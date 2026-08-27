@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../Branch/v4_3/Public/Common"
+		},
+		{
+			"path": "../../../Branch/v4_3/Private/Horis/v1"
+		}
+	],
+	"settings": {}
+}

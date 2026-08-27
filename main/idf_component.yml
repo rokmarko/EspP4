@@ -1,0 +1,21 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.5"
+
+  # LVGL. lvgl_cpp requires ^9.4, and 9.5 is where the vector API settled on the
+  # lv_draw_vector_dsc_* names that the binding wraps.
+  lvgl/lvgl:
+    version: "~9.5.0"
+    public: true
+
+  # C++ binding for LVGL. Not on the ESP Component Registry, so pulled from git.
+  lvgl_cpp:
+    git: https://github.com/pedapudi/lvgl_cpp.git
+    version: main
+    public: true
+
+  # Waveshare BSP for the ESP32-P4-WIFI6-Touch-LCD-3.4C / 4C.
+  # Pulls in esp_lcd_jd9365 (MIPI-DSI panel), esp_lcd_touch_gt911 and
+  # espressif/esp_lvgl_adapter.
+  waveshare/esp32_p4_wifi6_touch_lcd_xc:
+    version: "^3.0.1"

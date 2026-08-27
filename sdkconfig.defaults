@@ -1,0 +1,80 @@
+# =============================================================================
+#  Waveshare ESP32-P4-WIFI6-Touch-LCD-4C  ·  LVGL 9 + ThorVG
+# =============================================================================
+
+# --- Target / silicon ---------------------------------------------------------
+CONFIG_IDF_TARGET="esp32p4"
+# ESP-IDF 5.5.1 only knows ESP32-P4 revisions up to v1.0 and PSRAM up to 200 MHz.
+# Waveshare's own examples pin rev 3.x and 250 MHz, which needs IDF >= 5.5.5 --
+# those symbols do not exist here and would be silently ignored. The minimum
+# revision is therefore left at the IDF default (v0.1), which boots on any board.
+# 200 MHz PSRAM is gated behind the experimental-features flag.
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# --- Flash / partitions -------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- PSRAM --------------------------------------------------------------------
+# The 720x720 frame buffers and the ARGB8888 vector canvas all live here.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# --- System -------------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# The only host link on this board is USB-Serial/JTAG (/dev/ttyACM0). As a
+# *secondary* console it is output-only, so the debug console could not be
+# driven from the host. Making it primary gives both directions.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# ThorVG spawns its own std::thread workers (one per LVGL SW draw unit) and
+# rasterises on them. rleRender() alone puts a fixed 16 kB Cell buffer on the
+# stack (RENDER_POOL_SIZE in tvgSwRle.cpp) plus RleWorker and Band[40], so
+# anything at or below 16 kB faults. 32 kB leaves real headroom.
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=32768
+
+# --- Board support package ----------------------------------------------------
+# 4C = 4 inch, 720x720. Set CONFIG_BSP_LCD_TYPE_800_800_3_4_INCH instead for the 3.4C.
+CONFIG_BSP_LCD_TYPE_720_720_4_INCH=y
+
+# --- LVGL core ----------------------------------------------------------------
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=15
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+# Recommended by LVGL whenever ThorVG or FreeType renders on the draw threads.
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=32768
+CONFIG_LV_USE_PERF_MONITOR=y
+# lv_snapshot_take(), used by the serial console's screenshot command.
+CONFIG_LV_USE_SNAPSHOT=y
+# lvgl_cpp's PropertySetters mixin uses lv_property_t / lv_obj_set_property
+# unconditionally on LVGL 9.5+, and those only exist with this option on.
+CONFIG_LV_USE_OBJ_PROPERTY=y
+# LVGL 9.5.0 has a compile bug in the !LV_USE_OBJ_PROPERTY_NAME branch of
+# lv_obj_class_property_get_id() (LV_UNUSED(obj) where obj does not exist).
+# Turning names on takes the other branch. Costs a const name table per widget class.
+CONFIG_LV_USE_OBJ_PROPERTY_NAME=y
+CONFIG_LV_USE_SYSMON=y
+
+# --- Vector graphics: LVGL's bundled ThorVG ----------------------------------
+CONFIG_LV_USE_MATRIX=y
+CONFIG_LV_USE_VECTOR_GRAPHIC=y
+CONFIG_LV_USE_THORVG=y
+CONFIG_LV_USE_THORVG_INTERNAL=y
+# Lottie needs ThorVG's SVG/JSON loaders. Off by default to keep the binary small;
+# flip to =y (plus CONFIG_LV_USE_LOTTIE) to play .json animations.
+CONFIG_LV_USE_LOTTIE=n
+
+# --- Fonts used by the demo ---------------------------------------------------
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
