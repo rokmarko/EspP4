@@ -28,6 +28,7 @@ set(SRC_PARAM_FILES
     ${COMMON}/Parameter/ParamBands.cpp
     ${COMMON}/Parameter/ParamDefines.cpp
     ${COMMON}/Parameter/ParamFunction.cpp
+    ${COMMON}/Parameter/ParamFormat.cpp
     ${COMMON}/Parameter/ParamUnitGroup.cpp
 )
 
@@ -38,6 +39,10 @@ set(SRC_UNIT_FILES
     ${COMMON}/Unit/AbstractUnitFormatter.cpp
     ${COMMON}/Unit/UnitFormatterUtf8.cpp
     ${COMMON}/Utf8Utils.cpp
+    # avio::format is the layer above: it holds the one Formatter the whole
+    # tree formats through, and turns values into the strings the product
+    # shows. AbstractUnitFormatter.cpp already calls into it.
+    ${COMMON}/Avio/Format/AvioFormat.cpp
 )
 
 # The scale itself. ScaleStyle.h / ScaleMarkings.h are header-only; ScaleUtils
@@ -127,7 +132,6 @@ idf_component_register(
          "AppModel.cpp"
          "CanPortEsp.cpp"
          "CanProcessor.cpp"
-         "UnitFormat.cpp"
          "VectorScene.cpp"
          "ScaleDrawTvg.cpp"
          "SerialConsole.cpp"

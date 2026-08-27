@@ -7,6 +7,8 @@
  * BSP component; this file only starts it and hands over to the scene.
  */
 
+#include "KanardiaCommon.h"
+
 #include "bsp/display.h"
 #include "bsp/esp-bsp.h"
 
@@ -17,9 +19,27 @@
 #include "SerialConsole.h"
 #include "VectorScene.h"
 
+#include "Avio/Format/AvioFormat.h"
+#include "Unit/UnitFormatterUtf8.h"
+
 namespace {
 constexpr const char *TAG = "main";
+
+/**
+ * Hand Common's formatting layer the formatter it works through.
+ *
+ * `avio::format` keeps one process-wide `unit::Formatter*` and asserts on it;
+ * everything below -- ToString(), ToStringFromSystemUnit(), Formatter::
+ * FormatAzimuth() -- reaches it from there, so no call site has to carry one.
+ * The UTF-8 formatter is the one that maps a unit onto the private-use
+ * codepoint the Kanardia font draws for it.
+ */
+void InstallUnitFormatter()
+{
+    static const unit::FormatterUtf8 formatter;
+    avio::format::SetUnitFormatter(&formatter);
 }
+} // namespace
 
 extern "C" void app_main(void)
 {
@@ -45,6 +65,9 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "display init failed");
         return;
     }
+
+    /* Before anything formats a value -- the scene builds its labels below. */
+    InstallUnitFormatter();
 
     bsp_display_lock(UINT32_MAX);
     const bool ok = demo::CreateScene();

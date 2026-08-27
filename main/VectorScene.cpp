@@ -19,8 +19,9 @@
 #include "AppModel.h"
 #include "KanardiaFont.h"
 #include "ScaleDrawTvg.h"
-#include "UnitFormat.h"
+#include "Avio/Format/AvioFormat.h"
 #include "Parameter/ParamBands.h"
+#include "Parameter/ParamFormat.h"
 
 #include <cmath>
 #include <optional>
@@ -57,6 +58,44 @@ constexpr const char *TAG = "scene";
 constexpr int32_t  CANVAS_SIZE = 400;
 constexpr float    CTR         = CANVAS_SIZE / 2.0f;
 constexpr uint32_t FRAME_MS    = 33;   /* ~30 vector frames/s */
+
+/**
+ * The unit's own glyph, falling back to its plain ASCII signature.
+ *
+ * Common never drew a glyph for rpm or percent, and the formatter answers an
+ * empty string rather than falling back by itself -- so the fallback lives
+ * here. Everything with a glyph (km/h, ft, hPa, ...) reaches the panel as the
+ * single private-use codepoint the Kanardia font carries for it.
+ */
+std::string UnitGlyph(unit::Key eKey)
+{
+    using avio::format::UnitExtension;
+    std::string ss = avio::format::ToString(eKey, UnitExtension::Glyph);
+    if (ss.empty()) ss = avio::format::ToString(eKey, UnitExtension::Signature);
+    return ss;
+}
+
+/**
+ * A readout, printed the way the rest of the Kanardia code prints one.
+ *
+ * parameter::Format() is where avio::format sends the number in its own
+ * Parameter overloads, and it is the piece that knows what a given function
+ * deserves: rpm and altitude round to the nearest ten, airspeed to the unit.
+ * (Hold altitude in metres and avio::format::AltitudeToString() is the same
+ * call with the conversion folded in.)
+ *
+ * @param fUser  value already in @p eKey, not in the function's system unit.
+ */
+std::string Readout(float fUser, parameter::Function eFunction, unit::Key eKey)
+{
+    std::string ss = parameter::Format(fUser, eFunction, eKey);
+    const std::string ssUnit = UnitGlyph(eKey);
+    if (ssUnit.empty() == false) {
+        ss += ' ';
+        ss += ssUnit;
+    }
+    return ss;
+}
 
 constexpr float DEG2RAD = 3.14159265358979f / 180.0f;
 
@@ -665,20 +704,26 @@ void Scene::Tick()
                          static_cast<int>(CANVAS_SIZE), static_cast<int>(CANVAS_SIZE),
                          ms_x10 / 10, ms_x10 % 10);
 
-    /* Every readout goes through the shared formatter, so the unit comes out
-     * as the product font's own glyph wherever Common has one for it. */
+    /* Every readout goes through Common's own formatting layer, so the number
+     * is rounded the way that function is rounded everywhere else and the unit
+     * comes out as the product font's glyph wherever Common has one. */
+    using parameter::Function;
     switch (m_eMode) {
         case Mode::Gauge:
-            m_valueLabel->set_text(app::FormatValue(m_fValue, unit::Key::percent).c_str());
+            m_valueLabel->set_text(
+                Readout(m_fValue, Function::ThrottlePos, unit::Key::percent).c_str());
             break;
         case Mode::Scale:
-            m_valueLabel->set_text(app::FormatValue(m_fRpm, unit::Key::RPM).c_str());
+            m_valueLabel->set_text(
+                Readout(m_fRpm, Function::EngineRPM, unit::Key::RPM).c_str());
             break;
         case Mode::Ias:
-            m_valueLabel->set_text(app::FormatValue(m_fIasKmh, unit::Key::km_h).c_str());
+            m_valueLabel->set_text(
+                Readout(m_fIasKmh, Function::Airspeed, unit::Key::km_h).c_str());
             break;
         case Mode::Altimeter:
-            m_valueLabel->set_text(app::FormatValue(m_fAltFeet, unit::Key::feet).c_str());
+            m_valueLabel->set_text(
+                Readout(m_fAltFeet, Function::Altitude, unit::Key::feet).c_str());
             break;
     }
 
@@ -788,11 +833,11 @@ bool Scene::Build()
      * Not one of these glyphs exists in Unicode proper. Shown on the demo
      * scene only; the instruments have their own faces. */
     const std::string ssGlyphs =
-        app::UnitText(unit::Key::C)    + " " + app::UnitText(unit::Key::F)    + "  " +
-        app::UnitText(unit::Key::km_h) + " " + app::UnitText(unit::Key::m_s)  + "  " +
-        app::UnitText(unit::Key::kts)  + " " + app::UnitText(unit::Key::mph)  + "  " +
-        app::UnitText(unit::Key::feet) + " " + app::UnitText(unit::Key::NM)   + "  " +
-        app::UnitText(unit::Key::hPa)  + " " + app::UnitText(unit::Key::inHg);
+        UnitGlyph(unit::Key::C)    + " " + UnitGlyph(unit::Key::F)    + "  " +
+        UnitGlyph(unit::Key::km_h) + " " + UnitGlyph(unit::Key::m_s)  + "  " +
+        UnitGlyph(unit::Key::kts)  + " " + UnitGlyph(unit::Key::mph)  + "  " +
+        UnitGlyph(unit::Key::feet) + " " + UnitGlyph(unit::Key::NM)   + "  " +
+        UnitGlyph(unit::Key::hPa)  + " " + UnitGlyph(unit::Key::inHg);
     m_glyphs.emplace(*m_screen, ssGlyphs.c_str());
     m_glyphs->style().text_font(&lv_font_kanardia_28).text_color(Color(0x7FA5D8));
     m_glyphs->align(Align::TopMid, 0, 132);
