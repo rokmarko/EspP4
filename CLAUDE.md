@@ -11,6 +11,13 @@ the compiler and the board are the feedback loop.
 
 ## Commands
 
+The build also needs **lv_font_conv**, LVGL's own font converter, because the
+Kanardia fonts are generated from the TTF at build time. Install it once:
+
+```bash
+npm install --prefix tools lv_font_conv
+```
+
 Every command needs the IDF environment sourced first; it is **not** on `PATH` by default:
 
 ```bash
@@ -57,9 +64,12 @@ without looking at it. Read that SKILL.md before touching serial or snapshots --
 it lists the traps (port-open resets the chip, logs corrupt the base64 stream,
 LVGL's RGB888 is B,G,R).
 
-Measured on hardware: **~100-170 ms per ThorVG frame**, so the UI runs at 6-8 fps
-against a 33 ms timer, and **internal heap dips to ~34 KB** while the gauge
-renders. That heap figure is the tightest resource in the project.
+Measured on hardware, per scene: **gauge ~60 ms, ias ~38 ms, scale ~34 ms,
+altimeter ~28 ms** per ThorVG frame, against a 33 ms timer -- so the UI runs at
+roughly 16 fps on the gauge and hits the timer on the others. **Internal heap
+dips to ~60 kB** while rendering (vs ~105 kB between frames). That heap figure
+is the tightest resource in the project; the model task's own stack headroom is
+in the console's `model_stack=` field.
 
 ## Architecture
 
@@ -113,17 +123,85 @@ paths instead of a QPainter. Two things to know before touching it:
   terminate if they ever fired. `-DNO_LZO_COMPRESSION` (Common's own switch)
   keeps miniLZO out of the image.
 
+**Fonts are generated, not checked in.** `main/CMakeLists.txt` runs
+`Public/Font/Kanardia.ttf` through `lv_font_conv` at build time -- LVGL's own
+pipeline, the same tool `scripts/built_in_font/` uses for Montserrat -- and
+emits one `.c` per size into the build tree plus a generated `KanardiaFont.h`
+holding the `LV_FONT_DECLARE`s and a `KANARDIA_FONT_LIST(X)` X-macro. Change
+`KANARDIA_FONT_SIZES` and the header follows; nothing else needs touching,
+because `Painter::CreateFont()` builds its lookup table from that macro.
+
+The font carries Kanardia's unit glyphs in the private-use area, so
+`KANARDIA_FONT_RANGES` exports `0xE000-0xE118` alongside ASCII. The demo scene
+shows a row of them as proof they survived the conversion. The Montserrat
+fonts are still enabled in `sdkconfig` because `LV_FONT_DEFAULT` points at one;
+nothing in this project draws with them any more.
+
+**Values are printed through Common's unit layer.** `UnitFormat.h/.cpp` wrap
+`unit::FormatterUtf8`, which maps a `unit::Key` onto the private-use codepoint
+`Common/UserTTF.h` assigns it -- so `km/h` reaches the panel as one stacked
+glyph, not four characters. `unit::Convert()` does the unit arithmetic, which is
+why no 3.6 or 3.28084 constants appear in the scenes any more: the model holds
+SI, the scales ask for `km_h` and `feet`.
+
+Two things to know:
+
+- **`Common/Unit/Value.h` opens with `#error "Obsolete"`** and cannot be used.
+  The value/unit pairing it provided is now a plain `(float, unit::Key)`, which
+  is what `app::FormatValue()` takes.
+- **Not every unit has a glyph.** `FormatterUtf8::Format(..., Glyph)` answers
+  with an empty string for `RPM`, `percent` and anything else Common never drew
+  one for, so `app::UnitText()` falls back Glyph -> Signature. Never use the
+  formatter's result without that fallback.
+
+`main/CMakeLists.txt` also defines **`ESP32`** for the Common sources:
+`Common/Defines.h` routes `PRINTF` to `ESP_LOGI` behind `defined(ESP32)`, and
+IDF does not define it for the P4. It is the only `ESP32` test in the whole
+tree, so it just selects the logging branch Common already intends.
+
+**Common → the CAN bus.** `CanPortEsp` implements `can::AbstractCanPort` on
+the P4's TWAI controller, and `CanProcessor` is the CANaerospace side: it
+mirrors `can::CANHandler::Process()` -- split incoming messages by id range into
+services, status, NOD and special -- without the `CANHandler` template, which
+needs a product's whole sender/service stack. NOD messages go into the
+`DirectNOD` the model reads; sign-of-life messages go into
+`can::uCUnitInfoContainer`, the microcontroller-side unit container.
+
+`main/ApplicationDefines.h` is the extension point Common expects from every
+product: our node id and which halves of the optional services we implement.
+Only `USE_CAN_MIS_A` is on -- we ask other modules to identify themselves and
+answer nothing, so the container's "identified" count stays at zero on a bus
+where nobody answers. That is correct, not a fault.
+
+**There is no CAN transceiver on this board**, so the TWAI pins go nowhere.
+`Mode::SelfTest` is the default and exercises the whole path anyway: RX is
+mapped onto the TX pin so the GPIO matrix loops the signal back, the controller
+runs in `TWAI_MODE_NO_ACK` (nobody is there to acknowledge), and frames are
+transmitted as self-reception requests (`twai_message_t::self`). All three are
+needed -- NO_ACK alone transmits but never receives. In that mode `Simulate()`
+and `SendSignOfLife()` put real CANaerospace frames on the controller and they
+arrive back through the full decode path. Both go silent in `Mode::Normal`:
+on a real bus those ids belong to somebody else.
+
 **Common → the flight model.** `AppModel.h/.cpp` derive a concrete
 `avio::ModelBase` and tick it on its own FreeRTOS task: `Update50ms()` on a
-50 ms beat, `Update1s()` once per second. There is no CAN bus, GNSS receiver or
-options storage on this board, so the abstract hooks answer "nothing connected"
-and `Model::Simulate()` plays the part of the engine ECU by writing
-`can::Id::EngineRPM_1` into the `DirectNOD`. Everything above the NOD -- GNSS,
+50 ms beat, `Update1s()` once per second, plus the CAN processor's one-second
+work. There is no GNSS receiver or options storage on this board, so those
+hooks answer "nothing connected"; the NOD is fed from the CAN port. Everything above the NOD -- GNSS,
 navigation, clock, sunrise/sunset, the above/below detectors behind
 `IsFlying()` / `IsEngineRunning()` / `IsMoving()` -- is the unmodified shared
-code. The scale scene reads its rpm from the model, and the console's `i` line
-carries `rpm=`, `eng=`, `moving=` and `model_stack=` so the loop can be checked
-from the host.
+code. The three instrument scenes read rpm, IAS and altitude from the model, and the
+console's `i` line carries `rpm=`, `eng=`, `moving=` and `model_stack=` so the
+loop can be checked from the host.
+
+Scenes cycle `gauge` -> `scale` (tachometer, `Scale::DrawArc`) -> `ias`
+(airspeed, `Scale::DrawArcIAS`) -> `altimeter` (three pointers over a
+full-circle `DrawArc`). `Arc2D::IsCircle()` is what makes the altimeter drop the
+label that would otherwise land on top of its zero.
+
+**Labels are always white**, whatever the pen -- `DrawTextAsPath()` in the Qt
+original forces white too, and without it `DrawArcIAS` leaves a red pen behind
+after the Vne dash and every label comes out red.
 
 `VectorScene.cpp` holds one file-static `Scene`. Its widgets are
 `std::optional<T>` members constructed in `Build()`, because binding objects are

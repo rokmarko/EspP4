@@ -23,9 +23,19 @@ ESP-IDF v5.5.1 at `~/esp/v5.5.1/esp-idf`, with the ESP32-P4 toolchain installed:
 ~/esp/v5.5.1/esp-idf/install.sh esp32p4
 ```
 
-No additional OS packages are needed. The driver needs `pyserial`, which lives
-in the IDF virtualenv — it re-execs itself there automatically, so serial
-commands work from a plain `python3` with no `source export.sh`.
+The **build** additionally needs `lv_font_conv` (Node), because the Kanardia
+fonts are generated from the TTF at build time. Install it once:
+
+```bash
+npm install --prefix tools lv_font_conv
+```
+
+CMake looks for it in `tools/node_modules/.bin`, then on `PATH`, and fails with
+that instruction if it finds neither.
+
+The driver needs `pyserial`, which lives in the IDF virtualenv — it re-execs
+itself there automatically, so serial commands work from a plain `python3` with
+no `source export.sh`.
 
 ## Run (agent path)
 
@@ -38,7 +48,7 @@ python3 .claude/skills/run-espp4/driver.py smoke          # exit 0 / 1
 python3 .claude/skills/run-espp4/driver.py stats
 python3 .claude/skills/run-espp4/driver.py monitor --secs 10
 python3 .claude/skills/run-espp4/driver.py shot --scene scale   --out scale.png
-python3 .claude/skills/run-espp4/driver.py shot --scene rosette --full --out rosette.png
+python3 .claude/skills/run-espp4/driver.py shot --scene altimeter --full --out alt.png
 ```
 
 `smoke` resets the board, checks five boot markers, fails on any panic marker,
@@ -61,10 +71,19 @@ flight model (`main/AppModel.cpp`), and are how you check that its 50 ms
 processing loop is actually ticking. `model_stack` is the model task's smallest
 free stack in bytes -- internal RAM is the scarce resource here, so watch it.
 
+The `can_*` fields cover the CAN side. The board has no transceiver, so the port
+runs in self-test (`can=self-test`): frames are looped back inside the
+controller, which still exercises decode, NOD store and the unit container.
+`can_rx` should track `can_tx`; `can_nod` is a little lower because the
+sign-of-life and module-info frames are services, not NOD. `can_alive` counts
+units heard from, `can_ident` counts those that answered the module-information
+request -- the latter stays 0 here, because this board implements only the
+asking half of that service.
+
 `shot` writes a real PNG of the panel and reports which scene it captured:
 
 ```
-panel.png  360x360  scene=rosette  1.8s     # default (step 2)
+panel.png  360x360  scene=ias      1.8s     # default (step 2)
 panel.png  720x720  scene=gauge    3.7s     # --full
 ```
 
@@ -101,8 +120,8 @@ Every one of these cost real debugging time.
 - **Opening the port resets the chip.** USB-Serial/JTAG uses DTR/RTS for reset,
   and pyserial asserts them on open. So *no board state survives between driver
   invocations* — `toggle` in one command then `shot` in the next captures the
-  default scene. Use `shot --scene rosette`, which toggles and verifies inside
-  one session.
+  default scene. Use `shot --scene ias`, which toggles and verifies inside
+  one session. The scenes cycle gauge -> scale -> ias -> altimeter.
 - **Stray bytes can toggle the scene behind your back** right after connect
   (leftovers in the USB endpoint). Never assume blind toggling worked; the
   driver reads the scene back from `<<<STATS>>>` and `shot` prints what it
@@ -134,13 +153,16 @@ Every one of these cost real debugging time.
 
 ## Performance and headroom (measured, not estimated)
 
-- **~118–170 ms per ThorVG frame** (gauge is the expensive scene). The animation
-  timer asks for 33 ms, so the UI actually runs at **6–8 fps**, not 30. This is
-  software rasterisation of a 400×400 ARGB8888 canvas on a 360 MHz core; treat
-  the 30 fps target in the code as aspirational.
-- **Internal heap dips to ~33 KB** while the gauge renders (vs ~133 KB idle) —
+- **Per ThorVG frame: gauge ~60 ms, ias ~38 ms, scale ~34 ms, altimeter ~28 ms.**
+  The animation timer asks for 33 ms, so the gauge runs at ~16 fps and the
+  instrument scenes roughly reach the timer. This is software rasterisation of a
+  400×400 ARGB8888 canvas on a 360 MHz core.
+- **Internal heap dips to ~60 KB** while rendering (vs ~105 KB between frames) —
   ThorVG's RLE span allocations are small enough to land in internal RAM. This
   is the tightest resource in the project; watch it after any scene change.
+- **`stats` cannot report another scene's frame time.** Opening the port resets
+  the chip, so a bare `stats` always reports the default scene. Read a scene's
+  frame time off the panel in a `shot --scene <name>` instead.
 
 ## Troubleshooting
 

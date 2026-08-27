@@ -5,17 +5,21 @@ A C++ ESP-IDF project for the **Waveshare ESP32-P4-WIFI6-Touch-LCD-4C**
 that renders **vector graphics with ThorVG** inside an **LVGL 9** UI, written
 through the **pedapudi/lvgl_cpp** C++ binding.
 
-Tap the screen to switch between the two scenes:
+Tap the screen to cycle the scenes:
 
-| Scene     | What it shows                                                              |
-|-----------|----------------------------------------------------------------------------|
-| `gauge`   | radial-gradient disc, dashed rotating rim, gradient-stroked arc, 61 tick marks, a bezier needle |
-| `rosette` | 14 cubic-bezier petals in two counter-rotating rings, additive blending, HSV colour cycling |
+| Scene       | What it shows                                                            |
+|-------------|--------------------------------------------------------------------------|
+| `gauge`     | radial-gradient disc, gradient-stroked arc, 61 tick marks, a bezier needle |
+| `scale`     | engine tachometer -- a Kanardia `scale::Style` drawn by `Scale::DrawArc()` |
+| `ias`       | airspeed indicator -- `Scale::DrawArcIAS()`: coloured arcs, white flap band, Vne radial, V-speed marks |
+| `altimeter` | three-pointer altimeter, full-circle scale, hundreds / thousands / ten-thousands hands |
 
-A live `ms/frame` readout shows what one ThorVG frame actually costs.
+The three instrument scenes are drawn from the shared Kanardia `Public/Common`
+code and read their values from `avio::ModelBase`. A live `ms/frame` readout
+shows what one ThorVG frame actually costs.
 
-**Status:** running on hardware. Boot, panel, touch, both scenes and screenshot
-capture all verified on a rev v1.3 board over `/dev/ttyACM0`.
+**Status:** running on hardware. Boot, panel, touch, all four scenes, the model
+loop and screenshot capture verified on a rev v1.3 board over `/dev/ttyACM0`.
 
 ---
 
@@ -83,7 +87,7 @@ and screenshotted without looking at the panel:
 
 ```bash
 python3 .claude/skills/run-espp4/driver.py smoke
-python3 .claude/skills/run-espp4/driver.py shot --scene rosette --full --out rosette.png
+python3 .claude/skills/run-espp4/driver.py shot --scene altimeter --full --out alt.png
 ```
 
 `shot` renders the whole 720x720 screen with `lv_snapshot_take()`, streams it out
@@ -96,9 +100,9 @@ console out.
 
 | | |
 |---|---|
-| ThorVG frame time | **~100-170 ms** (gauge is the costlier scene) |
-| Effective UI rate | **6-8 fps**, against a 33 ms timer -- the 30 fps target in the code is aspirational |
-| Free internal heap | ~133 kB idle, dipping to **~34 kB** while the gauge renders |
+| ThorVG frame time | **gauge ~60 ms, ias ~38 ms, scale ~34 ms, altimeter ~28 ms** |
+| Effective UI rate | ~16 fps on the gauge; the instrument scenes reach the 33 ms timer |
+| Free internal heap | ~105 kB between frames, dipping to **~60 kB** while rendering |
 | Free PSRAM | ~28.9 MB |
 
 The frame time is software rasterisation of a 400x400 ARGB8888 canvas on a
@@ -182,10 +186,15 @@ main/
   AppModel.h/.cpp        concrete avio::ModelBase + its 50 ms processing task
   VectorScene.h/.cpp     the LVGL UI and all ThorVG drawing
   ScaleDrawTvg.h/.cpp    the Kanardia scale on ThorVG; twin of ScaleDrawQt
+  CanPortEsp.h/.cpp      can::AbstractCanPort on the P4's TWAI controller
+  CanProcessor.h/.cpp    CANaerospace decode: NOD -> DirectNOD, units container
+  ApplicationDefines.h   our CAN node id and the services we implement
+  UnitFormat.h/.cpp      values printed via unit::FormatterUtf8 + unit::Convert
   KanardiaCommon.h       Qt shim so Public/Common compiles for this target
+  (build/fonts/)         lv_font_conv output: Kanardia 14/16/20/28 + KanardiaFont.h
   SerialConsole.h/.cpp   debug console: stats, scene toggle, screenshot
   idf_component.yml      BSP + LVGL + lvgl_cpp dependencies
-  CMakeLists.txt         Public/Common sources, RapidJSON/exception workarounds
+  CMakeLists.txt         Public/Common sources, font generation, RapidJSON workarounds
 ```
 
 ## References

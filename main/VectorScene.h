@@ -21,10 +21,10 @@ namespace demo {
  */
 bool CreateScene();
 
-/** Switch scene, exactly as a screen tap would. Takes the LVGL lock itself. */
+/** Advance to the next scene, exactly as a screen tap would. Takes the LVGL lock itself. */
 void ToggleScene();
 
-/** Current scene name: "gauge" or "rosette". */
+/** Current scene name: "gauge", "scale", "ias" or "altimeter". */
 const char *SceneName();
 
 /** Smoothed ThorVG cost of one frame, in tenths of a millisecond. */

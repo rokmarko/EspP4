@@ -17,6 +17,8 @@
 
 #include "Parameter/ParamBands.h"
 
+#include "KanardiaFont.h"
+
 #include "esp_log.h"
 
 #include <cmath>
@@ -72,14 +74,14 @@ void Painter::Emit()
 
 const lv_font_t *Painter::CreateFont(const style::Font &font)
 {
-    /* Only the sizes LVGL was compiled with exist; pick the closest one.
-     * Keep this table in step with CONFIG_LV_FONT_MONTSERRAT_* in sdkconfig. */
+    /* Only the sizes CMake generated exist; pick the closest one. The table
+     * comes straight out of the generated header, so it follows
+     * KANARDIA_FONT_SIZES without anyone having to remember to update it. */
     struct Entry { int iSize; const lv_font_t *pFont; };
     static const Entry aFonts[] = {
-        { 14, &lv_font_montserrat_14 },
-        { 16, &lv_font_montserrat_16 },
-        { 20, &lv_font_montserrat_20 },
-        { 28, &lv_font_montserrat_28 },
+#define KANARDIA_FONT_ENTRY(px, sym) { px, &sym },
+        KANARDIA_FONT_LIST(KANARDIA_FONT_ENTRY)
+#undef KANARDIA_FONT_ENTRY
     };
 
     const lv_font_t *pBest = aFonts[0].pFont;
@@ -224,7 +226,10 @@ void Scale::DrawLabelAt(
     dsc.text       = pszText;
     dsc.text_local = 1;      /* pszText is a stack buffer; make LVGL copy it */
     dsc.font       = pFont;
-    dsc.color      = lv_color_hex(P.GetPenColor() & ::gui::GUI_RGB_MASK);
+    /* Always white, whatever the pen is: DrawTextAsPath() in the Qt version
+     * forces white too, which is why labels survive DrawRedDashesIAS() leaving
+     * a red pen behind. */
+    dsc.color      = lv_color_hex(C32_WHITE);
     dsc.opa        = LV_OPA_COVER;
     dsc.align      = LV_TEXT_ALIGN_CENTER;
 

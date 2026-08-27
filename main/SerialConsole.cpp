@@ -22,6 +22,8 @@
 #ifndef DEMO_NO_SERIAL_CONSOLE
 
 #include "AppModel.h"
+#include "CanPortEsp.h"
+#include "CanProcessor.h"
 #include "VectorScene.h"
 
 #include "driver/usb_serial_jtag.h"
@@ -138,24 +140,35 @@ void SinkToBase64(const uint8_t *data, size_t len, void *ctx)
 
 void PrintStats()
 {
-    char line[256];
+    char line[384];
     const int tenths = demo::FrameTimeTenths();
 
     /* Model fields prove the processing loop is actually ticking: rpm comes
      * from the NOD, eng/moving from ModelBase's above/below detectors. */
-    const app::Model *pModel = app::GetModel();
+    const app::Model     *pModel = app::GetModel();
+    const app::CanPortEsp  *pPort = app::GetCanPort();
+    const app::CanProcessor *pProc = app::GetCanProcessor();
     const int  iRpm    = pModel ? static_cast<int>(pModel->GetEngineRPM() + 0.5f) : -1;
     const int  iEng    = pModel ? (pModel->IsEngineRunning() ? 1 : 0) : -1;
     const int  iMoving = pModel ? (pModel->IsMoving() ? 1 : 0) : -1;
 
     std::snprintf(line, sizeof(line),
                   "<<<STATS scene=%s frame_ms=%d.%d heap_int=%u heap_psram=%u "
-                  "rpm=%d eng=%d moving=%d model_stack=%u>>>\n",
+                  "rpm=%d eng=%d moving=%d model_stack=%u "
+                  "can=%s can_rx=%u can_tx=%u can_nod=%u can_alive=%d can_ident=%d can_err=%u can_state=%u>>>\n",
                   demo::SceneName(), tenths / 10, tenths % 10,
                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                   iRpm, iEng, iMoving,
-                  static_cast<unsigned>(app::ModelStackHeadroom()));
+                  static_cast<unsigned>(app::ModelStackHeadroom()),
+                  pPort ? app::CanPortEsp::ModeName(pPort->GetMode()) : "off",
+                  static_cast<unsigned>(pPort ? pPort->GetRxCount() : 0),
+                  static_cast<unsigned>(pPort ? pPort->GetTxCount() : 0),
+                  static_cast<unsigned>(pProc ? pProc->GetNodCount() : 0),
+                  pProc ? pProc->GetAliveUnitCount() : -1,
+                  pProc ? pProc->GetIdentifiedUnitCount() : -1,
+                  static_cast<unsigned>(pPort ? pPort->GetErrCount() : 0),
+                  static_cast<unsigned>(pPort ? pPort->GetBusState() : 0));
     WriteStr(line);
 }
 

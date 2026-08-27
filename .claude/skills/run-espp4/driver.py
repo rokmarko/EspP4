@@ -238,7 +238,7 @@ def select_scene(s, want):
     never survives between invocations), and stray bytes left in the USB
     endpoint can toggle it again behind our back. Read the scene back instead.
     """
-    for _ in range(4):
+    for _ in range(6):
         cur = read_scene(s)
         if cur is None:
             return None
@@ -381,7 +381,7 @@ def main():
     sp.add_argument("--out", default="panel.png")
     sp.add_argument("--full", action="store_true", help="720x720 instead of 360x360")
     sp.add_argument("--timeout", type=float, default=120)
-    sp.add_argument("--scene", choices=["gauge", "rosette", "scale"],
+    sp.add_argument("--scene", choices=["gauge", "scale", "ias", "altimeter"],
                     help="switch to this scene first, verifying via stats")
     sp.set_defaults(fn=cmd_shot)
 

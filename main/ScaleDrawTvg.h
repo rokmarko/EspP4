@@ -80,7 +80,7 @@ public:
     /** Fill with @p argb and stroke nothing -- Qt's brush with a null pen. */
     void SetBrush(::gui::ARGB argb);
 
-    /** Colour the labels are drawn in; follows the pen, as it does in Qt. */
+    /** The pen colour last set. Labels do not use it -- they are always white. */
     ::gui::ARGB GetPenColor() const { return m_penColor; }
 
     /** Pick the built-in LVGL font closest to @p font. */
@@ -97,8 +97,10 @@ public:
     void Flush() { m_dsc.draw(); }
 
     /**
-     * Nearest built-in Montserrat to @p font. The family name is ignored:
-     * this build has no font engine, only the sizes LVGL was compiled with.
+     * Nearest generated Kanardia face to @p font.
+     *
+     * The family name is ignored -- there is no font engine on the board, only
+     * the fixed set of sizes main/CMakeLists.txt runs through lv_font_conv.
      */
     static const lv_font_t *CreateFont(const style::Font &font);
 

@@ -11,7 +11,10 @@
 set(KANARDIA_BRANCH "$ENV{HOME}/Branch/v4_3" CACHE PATH
     "Root of the Kanardia v4_3 working copy (holds Public/ and Private/)")
 
-set(COMMON "${KANARDIA_BRANCH}/Public/Common")
+set(COMMON  "${KANARDIA_BRANCH}/Public/Common")
+# The microcontroller-side unit container lives in the private tree; the public
+# one (CanUnitInfo/UnitInfoBaseContainer) is a QObject and cannot be used here.
+set(PRIVATE_COMMON "${KANARDIA_BRANCH}/Private/Common")
 
 if(NOT EXISTS "${COMMON}/Scale/ScaleStyle.h")
     message(FATAL_ERROR
@@ -28,8 +31,13 @@ set(SRC_PARAM_FILES
     ${COMMON}/Parameter/ParamUnitGroup.cpp
 )
 
+# Units: the key/conversion tables plus the UTF-8 formatter, which is what maps
+# a unit onto the private-use glyph the product font draws for it.
 set(SRC_UNIT_FILES
     ${COMMON}/Unit/UnitKeys.cpp
+    ${COMMON}/Unit/AbstractUnitFormatter.cpp
+    ${COMMON}/Unit/UnitFormatterUtf8.cpp
+    ${COMMON}/Utf8Utils.cpp
 )
 
 # The scale itself. ScaleStyle.h / ScaleMarkings.h are header-only; ScaleUtils
@@ -59,8 +67,17 @@ set(SRC_NAVIGATION_FILES
     ${COMMON}/Avio/Navigation/NavigationRoute.cpp
 )
 
+# CANaerospace: the network object data store, the old-service stack (only the
+# module-information half is switched on, see ApplicationDefines.h), the unit
+# container and the abstract port the hardware driver implements.
 set(SRC_CAN_FILES
     ${COMMON}/CanAerospace/CanNOD.cpp
+    ${COMMON}/CanAerospace/CanOldServices.cpp
+    ${COMMON}/CanAerospace/ModuleInfoService.cpp
+    ${COMMON}/CanAerospace/StaticHelper.cpp
+    ${COMMON}/CanAerospace/CanIdUtils.cpp
+    ${COMMON}/CanPort/AbstractCanPort.cpp
+    ${PRIVATE_COMMON}/Application/uCUnitInfoContainer.cpp
 )
 
 set(SRC_MAP_FILES
@@ -108,11 +125,14 @@ set(SRC_COMMON_FILES
 idf_component_register(
     SRCS "Main.cpp"
          "AppModel.cpp"
+         "CanPortEsp.cpp"
+         "CanProcessor.cpp"
+         "UnitFormat.cpp"
          "VectorScene.cpp"
          "ScaleDrawTvg.cpp"
          "SerialConsole.cpp"
          ${SRC_COMMON_FILES}
-    INCLUDE_DIRS "." "${COMMON}" "${COMMON}/ThirdParty")
+    INCLUDE_DIRS "." "${COMMON}" "${COMMON}/ThirdParty" "${PRIVATE_COMMON}")
 
 # Common comes from a very different toolchain. Two adjustments:
 #
@@ -130,6 +150,10 @@ idf_component_register(
 # LZO-compressed BLOBs.
 set(COMMON_FLAGS
     -DNO_LZO_COMPRESSION
+    # Common/Defines.h routes PRINTF to ESP_LOGI behind `defined(ESP32)`, and
+    # IDF does not define that for the P4. It is the only ESP32 test in the
+    # whole tree, so defining it just picks the logging branch Common intends.
+    -DESP32
     -Wno-unused-parameter
     -Wno-missing-field-initializers
     -Wno-format
@@ -161,3 +185,130 @@ if("lvgl__lvgl" IN_LIST build_components)
         target_compile_options(${lvgl_lib} PRIVATE -Wno-format -Wno-error=cpp -Wno-error=attributes)
     endif()
 endif()
+
+
+# ---------------------------------------------------------------------------
+# Fonts
+#
+# Kanardia.ttf is the product font: Roboto with Kanardia's own unit glyphs
+# merged in, and those live in the private-use area from 0xE000. It is turned
+# into C at build time by lv_font_conv -- LVGL's own font pipeline, the same
+# tool scripts/built_in_font/ uses to generate the Montserrat fonts -- so no
+# generated font source is ever checked in and a size change is a one-line
+# edit here.
+#
+# lv_font_conv is a Node tool and is not part of ESP-IDF. Install it once:
+#
+#     npm install --prefix tools lv_font_conv
+#
+# or globally, or point -DLV_FONT_CONV=/path/to/lv_font_conv at an existing one.
+# ---------------------------------------------------------------------------
+
+set(KANARDIA_FONT_TTF "${KANARDIA_BRANCH}/Public/Font/Kanardia.ttf"
+    CACHE FILEPATH "TTF the LVGL fonts are generated from")
+
+set(KANARDIA_FONT_SIZES "14;16;20;28"
+    CACHE STRING "Pixel sizes to generate, smallest first")
+
+# ASCII, degree sign, bullet -- LVGL's own default range -- plus the unit
+# glyphs. The font carries 0xE000..0xE118 in the private-use area; anything in
+# the range with no glyph behind it is simply skipped by lv_font_conv.
+set(KANARDIA_FONT_RANGES "0x20-0x7F,0xB0,0x2022,0xE000-0xE118"
+    CACHE STRING "Codepoints to include")
+
+set(KANARDIA_FONT_BPP "4"
+    CACHE STRING "Anti-aliasing depth; 4 is what LVGL's built-in fonts use")
+
+find_program(LV_FONT_CONV
+    NAMES lv_font_conv
+    HINTS "${CMAKE_CURRENT_LIST_DIR}/../tools/node_modules/.bin"
+    DOC "LVGL font converter (npm install --prefix tools lv_font_conv)")
+
+if(NOT LV_FONT_CONV)
+    message(FATAL_ERROR
+        "lv_font_conv not found -- the Kanardia fonts are generated at build "
+        "time and cannot be built without it.\n"
+        "  npm install --prefix ${CMAKE_CURRENT_LIST_DIR}/../tools lv_font_conv\n"
+        "or pass -DLV_FONT_CONV=/path/to/lv_font_conv.")
+endif()
+
+if(NOT EXISTS "${KANARDIA_FONT_TTF}")
+    message(FATAL_ERROR "Font not found: ${KANARDIA_FONT_TTF}")
+endif()
+
+set(FONT_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/fonts")
+file(MAKE_DIRECTORY "${FONT_OUT_DIR}")
+
+set(KANARDIA_FONT_SRCS "")
+set(KANARDIA_FONT_DECLS "")
+set(KANARDIA_FONT_XLIST "")
+
+foreach(size IN LISTS KANARDIA_FONT_SIZES)
+    # lv_font_conv derives both the C symbol and its include guard from the
+    # output file name, so the file name is the font name.
+    set(font_name "lv_font_kanardia_${size}")
+    set(font_src  "${FONT_OUT_DIR}/${font_name}.c")
+
+    add_custom_command(
+        OUTPUT "${font_src}"
+        COMMAND "${LV_FONT_CONV}"
+                --font "${KANARDIA_FONT_TTF}"
+                -r "${KANARDIA_FONT_RANGES}"
+                --size ${size}
+                --bpp ${KANARDIA_FONT_BPP}
+                --no-compress --no-prefilter
+                --force-fast-kern-format
+                --format lvgl
+                -o "${font_src}"
+        DEPENDS "${KANARDIA_FONT_TTF}"
+        COMMENT "lv_font_conv: Kanardia ${size} px"
+        VERBATIM)
+
+    list(APPEND KANARDIA_FONT_SRCS "${font_src}")
+    string(APPEND KANARDIA_FONT_DECLS "LV_FONT_DECLARE(${font_name})\n")
+    string(APPEND KANARDIA_FONT_XLIST "    X(${size}, ${font_name}) \\\n")
+endforeach()
+
+# The header is generated alongside the fonts so the two can never drift: edit
+# KANARDIA_FONT_SIZES and the declarations follow.
+#
+# It is written once at configure time and then *copied* into place by a build
+# rule, rather than written straight to its final path. Ninja can only rebuild
+# what it has a rule for, and without the copy step a deleted header stays
+# deleted until the next reconfigure.
+set(FONT_HEADER_IN  "${CMAKE_CURRENT_BINARY_DIR}/font_template/KanardiaFont.h")
+set(FONT_HEADER_OUT "${FONT_OUT_DIR}/KanardiaFont.h")
+
+file(WRITE "${FONT_HEADER_IN}" "#pragma once
+
+/*
+ * Generated by main/CMakeLists.txt from ${KANARDIA_FONT_TTF} -- do not edit.
+ * Ranges: ${KANARDIA_FONT_RANGES}
+ */
+
+#include \"lvgl.h\"
+
+${KANARDIA_FONT_DECLS}
+/** Every generated size, smallest first: X(px, symbol). */
+#define KANARDIA_FONT_LIST(X) \\
+${KANARDIA_FONT_XLIST}
+")
+
+add_custom_command(
+    OUTPUT "${FONT_HEADER_OUT}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${FONT_HEADER_IN}" "${FONT_HEADER_OUT}"
+    DEPENDS "${FONT_HEADER_IN}"
+    COMMENT "Generating KanardiaFont.h"
+    VERBATIM)
+
+add_custom_target(kanardia_fonts DEPENDS ${KANARDIA_FONT_SRCS} "${FONT_HEADER_OUT}")
+
+# The generated sources say #include \"lvgl/lvgl.h\" unless told otherwise, and
+# under ESP-IDF the header is plain \"lvgl.h\".
+set_source_files_properties(${KANARDIA_FONT_SRCS}
+    DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+    PROPERTIES GENERATED TRUE COMPILE_DEFINITIONS "LV_LVGL_H_INCLUDE_SIMPLE")
+
+target_sources(${COMPONENT_LIB} PRIVATE ${KANARDIA_FONT_SRCS})
+target_include_directories(${COMPONENT_LIB} PUBLIC "${FONT_OUT_DIR}")
+add_dependencies(${COMPONENT_LIB} kanardia_fonts)

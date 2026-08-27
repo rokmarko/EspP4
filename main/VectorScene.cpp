@@ -17,11 +17,14 @@
 #include "lvgl_cpp.h"
 
 #include "AppModel.h"
+#include "KanardiaFont.h"
 #include "ScaleDrawTvg.h"
+#include "UnitFormat.h"
 #include "Parameter/ParamBands.h"
 
 #include <cmath>
 #include <optional>
+#include <string>
 #include <vector>
 
 #if !LV_USE_VECTOR_GRAPHIC
@@ -97,7 +100,7 @@ Pt Polar(float deg, float radius)
 
 class Scene {
 public:
-    enum class Mode { Gauge, Rosette, Scale };
+    enum class Mode { Gauge, Scale, Ias, Altimeter };
 
     bool Build();
 
@@ -108,9 +111,22 @@ public:
 private:
     void Tick();
     void DrawGauge(VectorDraw &dsc, VectorPath &path);
-    void DrawRosette(VectorDraw &dsc, VectorPath &path);
-    void DrawScale(scale::tvg::Painter &P);
+
     void BuildScale();
+    void DrawScale(scale::tvg::Painter &P);
+    void BuildIas();
+    void DrawIas(scale::tvg::Painter &P);
+    void BuildAltimeter();
+    void DrawAltimeter(scale::tvg::Painter &P);
+
+    /** Dial face disc, shared by the three instrument scenes. */
+    void DrawFace(scale::tvg::Painter &P);
+    /** One needle, built pointing up in local space and rotated to @p fAngleRad. */
+    void DrawNeedle(scale::tvg::Painter &P, float fAngleRad, float fLength,
+                    float fHalfWidth, uint32_t rgb);
+    /** Thin stick with a triangular tip -- the altimeter's ten-thousands hand. */
+    void DrawTipNeedle(scale::tvg::Painter &P, float fAngleRad, float fLength,
+                       float fHalfWidth, float fTip, uint32_t rgb);
 
     std::optional<Screen>  m_screen;
     std::optional<DrawBuf> m_buf;
@@ -119,19 +135,37 @@ private:
     std::optional<Label>   m_valueLabel;
     std::optional<Label>   m_stats;
     std::optional<Label>   m_hint;
+    std::optional<Label>   m_glyphs;
     std::optional<Timer>   m_timer;
 
-    /* Scene 3 is the Kanardia scale, assembled from the shared Common code. */
-    parameter::Bands       m_bands;
+    /* Scenes 2-4 are Kanardia scales, assembled from the shared Common code:
+     * an engine tachometer, an airspeed indicator and a three-pointer
+     * altimeter. All three read their value from the flight model. */
     parameter::gui::Colors m_colors;
+
+    parameter::Bands       m_bands;
     scale::Markings        m_markings;
     scale::style::Style    m_scaleStyle;
     scale::Arc2D           m_arc;
 
+    parameter::Bands       m_iasBands;
+    scale::Markings        m_iasMarkings;
+    scale::MarkingsIAS     m_iasMarkingsIAS;
+    scale::style::Style    m_iasStyle;
+    scale::style::StyleIAS m_iasStyleIAS;
+    scale::Arc2D           m_iasArc;
+
+    parameter::Bands       m_altBands;
+    scale::Markings        m_altMarkings;
+    scale::style::Style    m_altStyle;
+    scale::Arc2D           m_altArc;
+
     Mode  m_eMode      = Mode::Gauge;
     float m_fPhase     = 0.0f;   /* degrees, wraps at 360 */
     float m_fValue     = 0.0f;   /* 0..100, what the gauge shows */
-    float m_fRpm       = 0.0f;   /* engine rpm the scale needle points at */
+    float m_fRpm       = 0.0f;   /* engine rpm the tachometer needle points at */
+    float m_fIasKmh    = 0.0f;   /* indicated airspeed, user units */
+    float m_fAltFeet   = 0.0f;   /* baro-corrected altitude, user units */
     float m_fRenderMs = 0.0f;   /* smoothed cost of one ThorVG frame */
 };
 
@@ -253,70 +287,7 @@ void Scene::DrawGauge(VectorDraw &dsc, VectorPath &path)
 }
 
 // -----------------------------------------------------------------------------
-//  Scene 2: a rosette of bezier petals
-// -----------------------------------------------------------------------------
-
-void Scene::DrawRosette(VectorDraw &dsc, VectorPath &path)
-{
-    const std::vector<lv_grad_stop_t> disc_stops = {
-        GradStop(0x141E38, 0),
-        GradStop(BG_COLOR, 255),
-    };
-    path.append_circle(CTR, CTR, CTR - 1.0f, CTR - 1.0f);
-    dsc.set_fill_radial_gradient(CTR, CTR, CTR);
-    dsc.set_fill_gradient_stops(disc_stops);
-    dsc.set_fill_opa(LV_OPA_COVER);
-    dsc.set_stroke_opa(LV_OPA_TRANSP);
-    dsc.add_path(path);
-
-    /* One petal, drawn in local space with the stem at the origin. */
-    auto Petal = [&](float len, float width) {
-        path.clear();
-        path.move_to(0.0f, 0.0f);
-        path.cubic_to(width, -len * 0.35f, width * 0.55f, -len * 0.85f, 0.0f, -len);
-        path.cubic_to(-width * 0.55f, -len * 0.85f, -width, -len * 0.35f, 0.0f, 0.0f);
-        path.close();
-    };
-
-    /* Outer ring: 8 petals, additive blending so the overlaps glow. */
-    dsc.set_blend_mode(LV_VECTOR_BLEND_ADDITIVE);
-    dsc.set_stroke_opa(LV_OPA_TRANSP);
-    Petal(CTR - 24.0f, 78.0f);
-    for (int i = 0; i < 8; i++) {
-        const uint16_t hue = static_cast<uint16_t>(std::fmod(m_fPhase * 1.5f + i * 45.0f, 360.0f));
-        dsc.set_fill_color(lv_color_to_32(Color::from_hsv(hue, 85, 50), 0x8C));
-        dsc.identity();
-        dsc.translate(CTR, CTR);
-        dsc.rotate(m_fPhase + i * 45.0f);
-        dsc.add_path(path);
-    }
-
-    /* Inner ring: 6 petals turning the other way. */
-    Petal(CTR * 0.52f, 44.0f);
-    for (int i = 0; i < 6; i++) {
-        const uint16_t hue = static_cast<uint16_t>(std::fmod(300.0f - m_fPhase * 2.0f + i * 60.0f, 360.0f));
-        dsc.set_fill_color(lv_color_to_32(Color::from_hsv(hue, 70, 100), 0xA0));
-        dsc.identity();
-        dsc.translate(CTR, CTR);
-        dsc.rotate(-m_fPhase * 1.7f + i * 60.0f);
-        dsc.add_path(path);
-    }
-
-    dsc.set_blend_mode(LV_VECTOR_BLEND_SRC_OVER);
-    dsc.identity();
-
-    /* Core. */
-    path.clear();
-    path.append_circle(CTR, CTR, 26.0f, 26.0f);
-    dsc.set_fill_color(Rgba(0x0B1020, 0xE0));
-    dsc.set_stroke_color(Rgba(0x9FE8FF, 0xB0));
-    dsc.set_stroke_opa(LV_OPA_COVER);
-    dsc.set_stroke_width(2.0f);
-    dsc.add_path(path);
-}
-
-// -----------------------------------------------------------------------------
-//  Scene 3: a Kanardia scale, drawn by scale::tvg::Scale::DrawArc()
+//  Scene 2: a tachometer, drawn by scale::tvg::Scale::DrawArc()
 // -----------------------------------------------------------------------------
 
 /**
@@ -343,7 +314,7 @@ void Scene::BuildScale()
     const scale::style::Dash   major {22.0f, 4.0f};
     const scale::style::Dash   minor {12.0f, 2.0f};
     const scale::style::Band   band  {10.0f};
-    const scale::style::Font   font  {"Certa Sans", 20, false};
+    const scale::style::Font   font  {"Kanardia", 20, false};
     const scale::style::Offset offset{
         -34.0f,   /* major dash: from R-34 out to R-12 */
         -24.0f,   /* minor dash: from R-24 out to R-12 */
@@ -358,49 +329,272 @@ void Scene::BuildScale()
                          common::Rad(225.0f), common::Rad(-270.0f));
 }
 
-void Scene::DrawScale(scale::tvg::Painter &P)
+void Scene::DrawFace(scale::tvg::Painter &P)
 {
     VectorDraw &dsc  = P.GetDraw();
     VectorPath &path = P.GetPath();
 
-    /* Dial face. */
     path.append_circle(CTR, CTR, CTR - 1.0f, CTR - 1.0f);
     dsc.set_stroke_opa(LV_OPA_TRANSP);
     dsc.set_fill_color(Rgba(0x0E1424));
     dsc.set_fill_opa(LV_OPA_COVER);
     dsc.add_path(path);
     path.clear();
+}
 
-    /* The scale itself. DrawArc() flushes the vector work before it queues the
-     * labels, so anything added after this call lands on top of the text. */
-    scale::tvg::Scale::DrawArc(P, m_arc, m_markings, m_bands, m_colors, m_scaleStyle);
+/**
+ * A needle built pointing up in local space, then turned to @p fAngleRad.
+ *
+ * Arc2D angles run counter-clockwise from 3 o'clock; LVGL rotates clockwise and
+ * the needle already points at its own 12 o'clock, so the rotation is 90 - a.
+ */
+void Scene::DrawNeedle(scale::tvg::Painter &P, float fAngleRad, float fLength,
+                       float fHalfWidth, uint32_t rgb)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
 
-    /* Needle, built pointing up in local space. LVGL rotates clockwise while
-     * Arc2D angles run counter-clockwise, so the needle angle is 90 - a. */
-    const float rel  = m_bands.GetRange().GetRelativeBounded(m_fRpm);
-    const float aDeg = common::Deg(m_arc.GetAngle(rel));
-    const float r    = m_arc.GetRadius() - 62.0f;
-    const float w    = 8.0f;
+    const float r = fLength;
+    const float w = fHalfWidth;
 
     path.move_to(-w, 0.0f);
-    path.cubic_to(-w * 0.8f, -r * 0.55f, -2.0f, -r * 0.92f, 0.0f, -r);
-    path.cubic_to(2.0f, -r * 0.92f, w * 0.8f, -r * 0.55f, w, 0.0f);
+    path.cubic_to(-w * 0.8f, -r * 0.55f, -w * 0.25f, -r * 0.92f, 0.0f, -r);
+    path.cubic_to(w * 0.25f, -r * 0.92f, w * 0.8f, -r * 0.55f, w, 0.0f);
     path.close();
 
     dsc.set_stroke_opa(LV_OPA_TRANSP);
-    dsc.set_fill_color(Rgba(0xFF5C8A));
+    dsc.set_fill_color(Rgba(rgb));
     dsc.set_fill_opa(LV_OPA_COVER);
     dsc.identity();
     dsc.translate(CTR, CTR);
-    dsc.rotate(90.0f - aDeg);
+    dsc.rotate(90.0f - common::Deg(fAngleRad));
     dsc.add_path(path);
     dsc.identity();
     path.clear();
+}
+
+/**
+ * The altimeter's ten-thousands pointer: a thin stick with a triangular tip.
+ *
+ * It is the shortest of the three, as it should be, so on a real face it spends
+ * a lot of its time hidden under the fat thousands needle. The shape and the
+ * amber keep it readable when that happens -- it is drawn last, over both.
+ */
+void Scene::DrawTipNeedle(scale::tvg::Painter &P, float fAngleRad, float fLength,
+                          float fHalfWidth, float fTip, uint32_t rgb)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
+
+    const float w = fHalfWidth;
+    const float r = fLength;
+
+    /* Stick from the hub to r, then a triangle from r to r + fTip. */
+    path.move_to(-w, 0.0f);
+    path.line_to(-w, -r);
+    path.line_to(-w * 2.6f, -r);
+    path.line_to(0.0f, -r - fTip);
+    path.line_to(w * 2.6f, -r);
+    path.line_to(w, -r);
+    path.line_to(w, 0.0f);
+    path.close();
+
+    dsc.set_stroke_opa(LV_OPA_TRANSP);
+    dsc.set_fill_color(Rgba(rgb));
+    dsc.set_fill_opa(LV_OPA_COVER);
+    dsc.identity();
+    dsc.translate(CTR, CTR);
+    dsc.rotate(90.0f - common::Deg(fAngleRad));
+    dsc.add_path(path);
+    dsc.identity();
+    path.clear();
+}
+
+void Scene::DrawScale(scale::tvg::Painter &P)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
+
+    DrawFace(P);
+
+    /* DrawArc() flushes the vector work before it queues the labels, so
+     * anything added after this call lands on top of the text. */
+    scale::tvg::Scale::DrawArc(P, m_arc, m_markings, m_bands, m_colors, m_scaleStyle);
+
+    const float rel = m_bands.GetRange().GetRelativeBounded(m_fRpm);
+    DrawNeedle(P, m_arc.GetAngle(rel), m_arc.GetRadius() - 62.0f, 8.0f, 0xFF5C8A);
 
     /* Hub. */
     path.append_circle(CTR, CTR, 16.0f, 16.0f);
     dsc.set_fill_color(Rgba(0x0E1424));
+    dsc.set_fill_opa(LV_OPA_COVER);
     dsc.set_stroke_color(Rgba(0xFF5C8A));
+    dsc.set_stroke_opa(LV_OPA_COVER);
+    dsc.set_stroke_width(3.0f);
+    dsc.add_path(path);
+    path.clear();
+
+    P.Flush();
+}
+
+// -----------------------------------------------------------------------------
+//  Scene 3: an airspeed indicator, drawn by scale::tvg::Scale::DrawArcIAS()
+// -----------------------------------------------------------------------------
+
+/**
+ * A light-aircraft ASI in km/h: green normal-operating arc, yellow caution,
+ * a red radial at Vne, the white flap-operating band and four V-speed marks.
+ *
+ * The arc radius leaves room outside the band, because the V-speed triangles
+ * and their dots sit there.
+ */
+void Scene::BuildIas()
+{
+    /* Bands in user units (km/h). The red band is not drawn as an arc --
+     * DrawArcIAS() marks its low edge with a radial Vne dash instead. */
+    m_iasBands.SetLow(40.0f);
+    m_iasBands.Append( 75.0f, parameter::Color::NoColor, 0.0f);
+    m_iasBands.Append(200.0f, parameter::Color::Green,   0.0f);
+    m_iasBands.Append(250.0f, parameter::Color::Yellow,  0.0f);
+    m_iasBands.Append(260.0f, parameter::Color::Red,     0.0f);
+
+    /* Scale units are km/h (multiples 1): major every 20, minor every 10,
+     * a label every 40. */
+    m_iasMarkings = scale::Markings(20.0f, 2, 40.0f, 40.0f, 1.0f, 0);
+
+    const scale::style::Dash   major {18.0f, 4.0f};
+    const scale::style::Dash   minor {10.0f, 2.0f};
+    const scale::style::Band   band  {10.0f};
+    const scale::style::Font   font  {"Kanardia", 20, false};
+    const scale::style::Offset offset{
+        -30.0f,   /* major dash */
+        -22.0f,   /* minor dash */
+        -52.0f,   /* label centre */
+          0.0f,   /* band centred on R */
+    };
+    m_iasStyle = scale::style::Style(major, minor, band, font, offset);
+
+    /* White flap-operating band, just inside the coloured one. Both kinds of
+     * V mark live outside the band: inside, the dashes would be lost among the
+     * minor and major ticks. */
+    const scale::style::Band    white   {6.0f};
+    const scale::style::Dash    vDash   {18.0f, 4.0f};
+    const scale::style::Dash    vTri    {10.0f, 0.0f};
+    const scale::style::Dash    vRed    {24.0f, 5.0f};
+    const scale::style::OffsetIAS offIas{
+        -10.0f,   /* white band, just inside the coloured one */
+          6.0f,   /* V dash: from R+6 out to R+24 */
+         21.0f,   /* V triangle: apex at R+6, base at R+21 */
+        -30.0f,   /* Vne dash */
+    };
+    m_iasStyleIAS = scale::style::StyleIAS(white, vDash, vTri, vRed, offIas);
+
+    /* Vs0..Vfe is the white arc; the marks are the usual four. */
+    const std::vector<scale::VMark> marks = {
+        { 65.0f, "Vs0", C32_WHITE,  scale::Shape::Dash },
+        {110.0f, "Vy",  C32_CYAN,   scale::Shape::DashDash },
+        {130.0f, "Vfe", C32_WHITE,  scale::Shape::Triangle },
+        {175.0f, "Va",  C32_ORANGE, scale::Shape::TriangleDot },
+    };
+    m_iasMarkingsIAS = scale::MarkingsIAS(scale::RangeF(65.0f, 130.0f), marks);
+
+    m_iasArc = scale::Arc2D(scale::Vec2D(CTR, CTR), CTR - 52.0f,
+                            common::Rad(90.0f), common::Rad(-300.0f));
+}
+
+void Scene::DrawIas(scale::tvg::Painter &P)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
+
+    DrawFace(P);
+
+    /* The second arc is the scale proper -- the first 20 degrees are the
+     * pre-scale down to zero, which the needle never uses. */
+    const auto [aPre, aMain] = scale::tvg::Scale::DrawArcIAS(
+        P, m_iasArc, m_iasMarkings, m_iasMarkingsIAS, m_iasBands,
+        m_colors, m_iasStyle, m_iasStyleIAS);
+    (void)aPre;
+
+    const float rel = m_iasBands.GetRange().GetRelativeBounded(m_fIasKmh);
+    DrawNeedle(P, aMain.GetAngle(rel), aMain.GetRadius() - 44.0f, 7.0f, 0xF2F6FF);
+
+    path.append_circle(CTR, CTR, 14.0f, 14.0f);
+    dsc.set_fill_color(Rgba(0x0E1424));
+    dsc.set_fill_opa(LV_OPA_COVER);
+    dsc.set_stroke_color(Rgba(0xF2F6FF));
+    dsc.set_stroke_opa(LV_OPA_COVER);
+    dsc.set_stroke_width(3.0f);
+    dsc.add_path(path);
+    path.clear();
+
+    P.Flush();
+}
+
+// -----------------------------------------------------------------------------
+//  Scene 4: a three-pointer altimeter
+// -----------------------------------------------------------------------------
+
+/**
+ * The classic three-pointer face: one revolution is 1000 ft, labelled 0..9.
+ *
+ * The scale itself is an ordinary DrawArc() over a full circle -- Arc2D::
+ * IsCircle() is what makes DrawLabels() drop the label that would land on top
+ * of the zero.
+ */
+void Scene::BuildAltimeter()
+{
+    /* One uncoloured band spanning the revolution: no arcs, just the scale. */
+    m_altBands.SetLow(0.0f);
+    m_altBands.Append(1000.0f, parameter::Color::NoColor, 0.0f);
+
+    /* Scale units are hundreds of feet, so the face reads 0..10 and the
+     * labels come out 0..9. Five minors per major = one every 20 ft. */
+    m_altMarkings = scale::Markings(1.0f, 5, 0.0f, 1.0f, 100.0f, 0);
+
+    const scale::style::Dash   major {20.0f, 4.0f};
+    const scale::style::Dash   minor { 9.0f, 2.0f};
+    const scale::style::Band   band  { 0.0f};
+    const scale::style::Font   font  {"Kanardia", 28, false};
+    const scale::style::Offset offset{
+        -22.0f,   /* major dash: from R-22 out to R-2 */
+        -11.0f,   /* minor dash */
+        -54.0f,   /* label centre */
+          0.0f,
+    };
+    m_altStyle = scale::style::Style(major, minor, band, font, offset);
+
+    /* Full circle from 12 o'clock, clockwise. */
+    m_altArc = scale::Arc2D(scale::Vec2D(CTR, CTR), CTR - 26.0f,
+                            common::Rad(90.0f), common::Rad(-360.0f));
+}
+
+void Scene::DrawAltimeter(scale::tvg::Painter &P)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
+
+    DrawFace(P);
+    scale::tvg::Scale::DrawArc(P, m_altArc, m_altMarkings, m_altBands, m_colors, m_altStyle);
+
+    /* Three pointers, each geared ten times slower than the one before it.
+     * Thousands first, then hundreds, then the thin ten-thousands hand on top
+     * -- it is the shortest, so it needs to win every overlap. */
+    const float fAlt = m_fAltFeet;
+    const float fR   = m_altArc.GetRadius();
+
+    auto Relative = [fAlt](float fPerTurn) { return std::fmod(fAlt, fPerTurn) / fPerTurn; };
+
+    DrawNeedle(P, m_altArc.GetAngle(Relative(10000.0f)), fR - 88.0f, 11.0f, 0xE8F4FF);
+    DrawNeedle(P, m_altArc.GetAngle(Relative( 1000.0f)), fR - 34.0f,  6.0f, 0xE8F4FF);
+    DrawTipNeedle(P, m_altArc.GetAngle(Relative(100000.0f)),
+                  fR - 128.0f, 3.0f, 14.0f, 0xFFC145);
+
+    /* Hub, over all three roots. */
+    path.append_circle(CTR, CTR, 15.0f, 15.0f);
+    dsc.set_fill_color(Rgba(0x0E1424));
+    dsc.set_fill_opa(LV_OPA_COVER);
+    dsc.set_stroke_color(Rgba(0xE8F4FF));
     dsc.set_stroke_opa(LV_OPA_COVER);
     dsc.set_stroke_width(3.0f);
     dsc.add_path(path);
@@ -424,11 +618,17 @@ void Scene::Tick()
      * its DirectNOD on the 50 ms tick and ModelBase folds it in. Fall back to
      * the sine sweep only if the model loop never started. */
     if (const app::Model *pModel = app::GetModel()) {
-        m_fRpm = pModel->GetEngineRPM();
+        /* The model holds air data in the SI units CANaerospace carries;
+         * unit::Convert() does the arithmetic so no factors live here. */
+        m_fRpm     = pModel->GetEngineRPM();
+        m_fIasKmh  = unit::Convert(pModel->GetIAS(), unit::Key::m_s, unit::Key::km_h);
+        m_fAltFeet = unit::Convert(pModel->GetAltitude(), unit::Key::m, unit::Key::feet);
     }
     else {
-        m_fRpm = m_bands.GetRange().GetLow()
-               + m_bands.GetRange().GetSpan() * m_fValue / 100.0f;
+        m_fRpm     = m_bands.GetRange().GetLow()
+                   + m_bands.GetRange().GetSpan() * m_fValue / 100.0f;
+        m_fIasKmh  = -20.0f + 2.2f * m_fValue;
+        m_fAltFeet = 150.0f * m_fValue;
     }
 
     const int64_t t0 = esp_timer_get_time();
@@ -438,18 +638,22 @@ void Scene::Tick()
 
     lv_layer_t layer;
     m_canvas->init_layer(&layer);
-    if (m_eMode == Mode::Scale) {
-        /* The scale wants a Painter -- the same descriptor and path, plus the
-         * layer, because its labels go through LVGL's text renderer. */
-        scale::tvg::Painter P(&layer);
-        DrawScale(P);
-    }
-    else {
+    if (m_eMode == Mode::Gauge) {
         VectorDraw dsc(&layer);
         VectorPath path(LV_VECTOR_PATH_QUALITY_HIGH);
-        if (m_eMode == Mode::Gauge) DrawGauge(dsc, path);
-        else                      DrawRosette(dsc, path);
+        DrawGauge(dsc, path);
         dsc.draw();
+    }
+    else {
+        /* The scales want a Painter -- the same descriptor and path, plus the
+         * layer, because their labels go through LVGL's text renderer. */
+        scale::tvg::Painter P(&layer);
+        switch (m_eMode) {
+            case Mode::Scale:     DrawScale(P);     break;
+            case Mode::Ias:       DrawIas(P);       break;
+            case Mode::Altimeter: DrawAltimeter(P); break;
+            default: break;
+        }
     }
     m_canvas->finish_layer(&layer);  /* waits for the draw units */
 
@@ -461,11 +665,21 @@ void Scene::Tick()
                          static_cast<int>(CANVAS_SIZE), static_cast<int>(CANVAS_SIZE),
                          ms_x10 / 10, ms_x10 % 10);
 
-    if (m_eMode == Mode::Gauge) {
-        m_valueLabel->set_text_fmt("%d", static_cast<int>(m_fValue + 0.5f));
-    }
-    else if (m_eMode == Mode::Scale) {
-        m_valueLabel->set_text_fmt("%d rpm", static_cast<int>(m_fRpm + 0.5f));
+    /* Every readout goes through the shared formatter, so the unit comes out
+     * as the product font's own glyph wherever Common has one for it. */
+    switch (m_eMode) {
+        case Mode::Gauge:
+            m_valueLabel->set_text(app::FormatValue(m_fValue, unit::Key::percent).c_str());
+            break;
+        case Mode::Scale:
+            m_valueLabel->set_text(app::FormatValue(m_fRpm, unit::Key::RPM).c_str());
+            break;
+        case Mode::Ias:
+            m_valueLabel->set_text(app::FormatValue(m_fIasKmh, unit::Key::km_h).c_str());
+            break;
+        case Mode::Altimeter:
+            m_valueLabel->set_text(app::FormatValue(m_fAltFeet, unit::Key::feet).c_str());
+            break;
     }
 
     m_canvas->invalidate();
@@ -474,9 +688,10 @@ void Scene::Tick()
 const char *Scene::ModeName() const
 {
     switch (m_eMode) {
-        case Mode::Gauge:   return "gauge";
-        case Mode::Rosette: return "rosette";
-        case Mode::Scale:   return "scale";
+        case Mode::Gauge:     return "gauge";
+        case Mode::Scale:     return "scale";
+        case Mode::Ias:       return "ias";
+        case Mode::Altimeter: return "altimeter";
     }
     return "?";
 }
@@ -484,14 +699,28 @@ const char *Scene::ModeName() const
 void Scene::NextMode()
 {
     switch (m_eMode) {
-        case Mode::Gauge:   m_eMode = Mode::Rosette; break;
-        case Mode::Rosette: m_eMode = Mode::Scale;   break;
-        case Mode::Scale:   m_eMode = Mode::Gauge;   break;
+        case Mode::Gauge:     m_eMode = Mode::Scale;     break;
+        case Mode::Scale:     m_eMode = Mode::Ias;       break;
+        case Mode::Ias:       m_eMode = Mode::Altimeter; break;
+        case Mode::Altimeter: m_eMode = Mode::Gauge;     break;
     }
 
-    const bool bValue = (m_eMode != Mode::Rosette);
-    m_valueLabel->style().opa(bValue ? Opacity::Cover : Opacity::Transparent);
-    m_valueLabel->align(Align::Center, 0, m_eMode == Mode::Scale ? 142 : 78);
+    /* The readout has to dodge whatever each face already puts nearby. The ASI
+     * sweeps 300 degrees from the top, so its only clear ground is the gap
+     * between the hub and its own pre-scale labels; the tachometer's bottom is
+     * empty; the altimeter has to clear its "5". The box is taller than bare
+     * text, so these have less room to play with than they look. */
+    const int32_t iOffsetY = [this]() -> int32_t {
+        switch (m_eMode) {
+            case Mode::Gauge:     return  78;
+            case Mode::Scale:     return 142;
+            case Mode::Ias:       return -46;
+            case Mode::Altimeter: return  66;
+        }
+        return 0;
+    }();
+    m_valueLabel->align(Align::Center, 0, iOffsetY);
+    m_glyphs->style().opa(m_eMode == Mode::Gauge ? Opacity::Cover : Opacity::Transparent);
     m_hint->set_text_fmt("tap  -  %s", ModeName());
     ESP_LOGI(TAG, "mode -> %s", ModeName());
 }
@@ -503,6 +732,8 @@ void Scene::NextMode()
 bool Scene::Build()
 {
     BuildScale();
+    BuildIas();
+    BuildAltimeter();
 
     m_screen.emplace(Screen::active());
     m_screen->style().bg_color(Color(BG_COLOR)).bg_opa(Opacity::Cover);
@@ -524,20 +755,47 @@ bool Scene::Build()
     m_canvas->remove_flag(ObjFlag::Clickable);
 
     m_title.emplace(*m_screen, "ESP32-P4  -  LVGL 9  -  ThorVG");
-    m_title->style().text_font(&lv_font_montserrat_20).text_color(Color(0x9FB6E0));
+    m_title->style().text_font(&lv_font_kanardia_20).text_color(Color(0x9FB6E0));
     m_title->align(Align::TopMid, 0, 96);
 
+    /* The readout sits in its own rounded box, the way a digital window on an
+     * instrument face does. The label sizes itself to the text, so the padding
+     * is what gives the box its shape; it grows and shrinks with the value. */
     m_valueLabel.emplace(*m_screen, "0");
-    m_valueLabel->style().text_font(&lv_font_montserrat_28).text_color(Color(0xE8F4FF));
+    m_valueLabel->style()
+        .text_font(&lv_font_kanardia_28)
+        .text_color(Color(0xE8F4FF))
+        .bg_color(Color(0x0B1222))
+        .bg_opa(Opacity::Cover)
+        .radius(10)
+        .pad_hor(14)
+        .pad_ver(6)
+        .border_color(Color(0x3D5A9E))
+        .border_width(2)
+        .border_opa(Opacity::Cover);
     m_valueLabel->align(Align::Center, 0, 78);
 
     m_stats.emplace(*m_screen, "");
-    m_stats->style().text_font(&lv_font_montserrat_16).text_color(Color(0x6F86B5));
+    m_stats->style().text_font(&lv_font_kanardia_16).text_color(Color(0x6F86B5));
     m_stats->align(Align::BottomMid, 0, -108);
 
     m_hint.emplace(*m_screen, "tap  -  gauge");
-    m_hint->style().text_font(&lv_font_montserrat_16).text_color(Color(0x44557E));
+    m_hint->style().text_font(&lv_font_kanardia_16).text_color(Color(0x44557E));
     m_hint->align(Align::BottomMid, 0, -80);
+
+    /* Proof the whole chain works: unit::Key -> UserTTF codepoint ->
+     * FormatterUtf8 -> the private-use range the build exports from the TTF.
+     * Not one of these glyphs exists in Unicode proper. Shown on the demo
+     * scene only; the instruments have their own faces. */
+    const std::string ssGlyphs =
+        app::UnitText(unit::Key::C)    + " " + app::UnitText(unit::Key::F)    + "  " +
+        app::UnitText(unit::Key::km_h) + " " + app::UnitText(unit::Key::m_s)  + "  " +
+        app::UnitText(unit::Key::kts)  + " " + app::UnitText(unit::Key::mph)  + "  " +
+        app::UnitText(unit::Key::feet) + " " + app::UnitText(unit::Key::NM)   + "  " +
+        app::UnitText(unit::Key::hPa)  + " " + app::UnitText(unit::Key::inHg);
+    m_glyphs.emplace(*m_screen, ssGlyphs.c_str());
+    m_glyphs->style().text_font(&lv_font_kanardia_28).text_color(Color(0x7FA5D8));
+    m_glyphs->align(Align::TopMid, 0, 132);
 
     m_screen->on_click([this](lvgl::Event &) { NextMode(); });
     m_timer.emplace(FRAME_MS, [this](Timer *) { Tick(); });

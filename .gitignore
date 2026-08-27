@@ -22,3 +22,7 @@ compile_commands.json
 # --- Serial / debug artefacts ---
 *.core
 core.*
+
+# --- Generated / vendored tooling ---
+tools/node_modules/
+tools/package*.json
