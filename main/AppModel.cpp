@@ -267,8 +267,8 @@ void ModelTask(void *)
     for (;;) {
         vTaskDelayUntil(&tWake, pdMS_TO_TICKS(TICK_MS));
 
-        const float fSeconds = static_cast<float>(esp_timer_get_time() - tStart) / 1e6f;
-        g_pModel->Simulate(fSeconds);
+        // const float fSeconds = static_cast<float>(esp_timer_get_time() - tStart) / 1e6f;
+        // g_pModel->Simulate(fSeconds);
 
         g_pModel->Update50ms();
 
