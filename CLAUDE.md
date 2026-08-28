@@ -56,20 +56,26 @@ grep -E "^CONFIG_(SPIRAM_SPEED|LV_USE_THORVG|LV_DRAW)" sdkconfig
 ## Driving the board
 
 The firmware carries a one-character debug console on USB-Serial/JTAG
-(`main/SerialConsole.cpp`): `i` stats (scene, frame time, heap, and the model's
-rpm/eng/moving/stack), `t` toggle scene, `s`/`S` screenshot as
-base64 RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
+(`main/SerialConsole.cpp`): `i` stats (scene, frame time, heap, the model's
+rpm/eng/moving/stack, the CAN counters, the NVS entry count and the internal
+heap low-water mark), `t` toggle scene, `w` write the option blobs to NVS,
+`P` push a parameter at ourselves over CAN, `s`/`S` screenshot as base64
+RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
 `driver.py`, which is how you smoke-test the board or get a PNG of the panel
 without looking at it. Read that SKILL.md before touching serial or snapshots --
 it lists the traps (port-open resets the chip, logs corrupt the base64 stream,
 LVGL's RGB888 is B,G,R).
 
-Measured on hardware, per scene: **gauge ~60 ms, ias ~38 ms, scale ~34 ms,
-altimeter ~28 ms** per ThorVG frame, against a 33 ms timer -- so the UI runs at
-roughly 16 fps on the gauge and hits the timer on the others. **Internal heap
-dips to ~60 kB** while rendering (vs ~105 kB between frames). That heap figure
-is the tightest resource in the project; the model task's own stack headroom is
-in the console's `model_stack=` field.
+Measured on hardware, per scene: **gauge ~60 ms, rpm ~58 ms, ias ~38 ms,
+scale ~34 ms, altimeter ~28 ms** per ThorVG frame, against a 33 ms timer -- so the UI runs at
+roughly 16 fps on the gauge and hits the timer on the others. **Internal heap:
+low-water mark ~32 kB, largest contiguous block ~31 kB** once the three 32 kB
+task stacks are placed. Read `heap_int_min` in the console's `i` line, not
+`heap_int` -- the latter is a snapshot taken at a random point in a ThorVG
+frame and swings between ~35 kB and ~80 kB, which reads like a regression when
+it is only sampling noise. That is the tightest resource in the project; the
+model task's own stack headroom is `model_stack=`, and app_main logs the
+largest block at boot.
 
 ## Architecture
 
@@ -137,22 +143,37 @@ shows a row of them as proof they survived the conversion. The Montserrat
 fonts are still enabled in `sdkconfig` because `LV_FONT_DEFAULT` points at one;
 nothing in this project draws with them any more.
 
-**Values are printed through Common's unit layer.** `UnitFormat.h/.cpp` wrap
-`unit::FormatterUtf8`, which maps a `unit::Key` onto the private-use codepoint
-`Common/UserTTF.h` assigns it -- so `km/h` reaches the panel as one stacked
-glyph, not four characters. `unit::Convert()` does the unit arithmetic, which is
-why no 3.6 or 3.28084 constants appear in the scenes any more: the model holds
-SI, the scales ask for `km_h` and `feet`.
+**Values are printed through Common's own formatting layer.** `Avio/Format/AvioFormat.h`
+is the entry point: it holds the one process-wide `unit::Formatter*`, which
+`Main.cpp` installs with `avio::format::SetUnitFormatter()` before the scene is
+built. Everything below reaches it from there -- `avio::format::ToString()`,
+`Formatter::FormatAzimuth()`, the `Parameter` overloads -- so no call site
+carries a formatter. `unit::FormatterUtf8` is the one we install; it maps a
+`unit::Key` onto the private-use codepoint `Common/UserTTF.h` assigns it, so
+`km/h` reaches the panel as one stacked glyph, not four characters.
+`unit::Convert()` does the unit arithmetic, which is why no 3.6 or 3.28084
+constants appear in the scenes any more: the model holds SI, the scales ask for
+`km_h` and `feet`.
 
-Two things to know:
+The numbers go through `parameter::Format(fUser, Function, Key)`, which is where
+`avio::format`'s own `Parameter` overloads send theirs -- so rpm and altitude
+round to the nearest ten and airspeed to the unit, the same as every other
+Kanardia product. `VectorScene.cpp`'s file-local `Readout()` is just those two
+calls glued together.
 
+Four things to know:
+
+- **`SetUnitFormatter()` must be called before anything formats.** `GetUnitFormatter()`
+  asserts, and everything below it goes through that one pointer.
 - **`Common/Unit/Value.h` opens with `#error "Obsolete"`** and cannot be used.
-  The value/unit pairing it provided is now a plain `(float, unit::Key)`, which
-  is what `app::FormatValue()` takes.
+  The value/unit pairing it provided is now a plain `(float, unit::Key)`.
 - **Not every unit has a glyph.** `FormatterUtf8::Format(..., Glyph)` answers
   with an empty string for `RPM`, `percent` and anything else Common never drew
-  one for, so `app::UnitText()` falls back Glyph -> Signature. Never use the
+  one for, so `UnitGlyph()` falls back Glyph -> Signature. Never use the
   formatter's result without that fallback.
+- **`AvioFormat.cpp`'s `Parameter` overloads survive without `Param.cpp`** only
+  because `--gc-sections` drops them; `parameter::Parameter` itself is not built
+  here. Call one and the link breaks until `Parameter/Param.cpp` is added.
 
 `main/CMakeLists.txt` also defines **`ESP32`** for the Common sources:
 `Common/Defines.h` routes `PRINTF` to `ESP_LOGI` behind `defined(ESP32)`, and
@@ -169,9 +190,10 @@ needs a product's whole sender/service stack. NOD messages go into the
 
 `main/ApplicationDefines.h` is the extension point Common expects from every
 product: our node id and which halves of the optional services we implement.
-Only `USE_CAN_MIS_A` is on -- we ask other modules to identify themselves and
-answer nothing, so the container's "identified" count stays at zero on a bus
-where nobody answers. That is correct, not a fault.
+`USE_CAN_MIS_A` asks other modules to identify themselves and answers nothing,
+so the container's "identified" count stays at zero on a bus where nobody
+answers -- correct, not a fault. `USE_CAN_DDS_B` and `USE_CAN_MCS_B` are the
+receive half of the parameter push described below.
 
 **There is no CAN transceiver on this board**, so the TWAI pins go nowhere.
 `Mode::SelfTest` is the default and exercises the whole path anyway: RX is
@@ -192,12 +214,36 @@ navigation, clock, sunrise/sunset, the above/below detectors behind
 `IsFlying()` / `IsEngineRunning()` / `IsMoving()` -- is the unmodified shared
 code. The three instrument scenes read rpm, IAS and altitude from the model, and the
 console's `i` line carries `rpm=`, `eng=`, `moving=` and `model_stack=` so the
-loop can be checked from the host.
+loop can be checked from the host. `SaveLastKnownCoordinate()` is no longer a
+stub: it marks the option dirty and lets `Settings::Save()` write it to NVS.
 
 Scenes cycle `gauge` -> `scale` (tachometer, `Scale::DrawArc`) -> `ias`
 (airspeed, `Scale::DrawArcIAS`) -> `altimeter` (three pointers over a
-full-circle `DrawArc`). `Arc2D::IsCircle()` is what makes the altimeter drop the
-label that would otherwise land on top of its zero.
+full-circle `DrawArc`) -> `rpm` (engine and rotor side by side).
+`Arc2D::IsCircle()` is what makes the altimeter drop the label that would
+otherwise land on top of its zero.
+
+**The dual tachometer is two ordinary `DrawArc()` calls.** What makes the ")("
+layout is only where the two `Arc2D` centres sit and which way the spans run:
+each centre is pushed `R + GAP` outboard along the horizontal, so just the near
+flank of each circle lands on the panel -- the right flank of the left circle
+and the left flank of the right one. Both spans run bottom to top, so the two
+scales mirror. Because Common measures the style's dash and label offsets
+inward, towards the arc's own centre, the mirroring puts both sets of dashes
+and labels on the *outer* edges for free, with the coloured bands facing each
+other across the middle.
+
+Two consequences worth knowing:
+
+- **No needles.** A needle has to be rooted at its arc's centre, which here is
+  outboard of the panel edge. `Scene::DrawArcMarker()` draws a triangle riding
+  the scale instead, sitting just off the convex side and pointing back at the
+  dashes -- which is what a side-by-side tachometer reads like anyway.
+- **The readout boxes are colour-coded**, pink for engine and teal for rotor,
+  matching their markers. Both boxes say "RPM" and the numbers alone would not
+  say which scale they belong to. That is also the one place `m_valueLabel`
+  changes style by scene: this face needs two smaller boxes side by side where
+  every other one uses a single centred box at the full size.
 
 **Labels are always white**, whatever the pen -- `DrawTextAsPath()` in the Qt
 original forces white too, and without it `DrawArcIAS` leaves a red pen behind
@@ -207,6 +253,151 @@ after the Vne dash and every label comes out red.
 `std::optional<T>` members constructed in `Build()`, because binding objects are
 move-only and take ownership of the underlying `lv_obj_t`. A `lvgl::Timer`
 re-renders the canvas at ~30 fps.
+
+**Parameters are managed by Common's own container.** `AppParameters.h/.cpp`
+derives `app::Parameters` from `parameter::ParameterContainer` -- the hash of
+`parameter::Parameter` keyed by `can::Id` that every Kanardia product uses. Each
+parameter carries its function, its system unit, the unit the pilot reads, its
+colour bands, its names and a low-pass filter, and pulls its own value through a
+callback straight out of the `can::DirectNOD`. The three instrument scenes read
+values and bands from it, so `VectorScene.cpp` no longer builds bands by hand,
+calls model getters, or does unit arithmetic.
+
+Two things to know:
+
+- **Bands are stored in the system unit, not the user unit.**
+  `function_util::GetSystemUnit()` says m/s for airspeed, metres for altitude,
+  rpm for engine speed; `Parameter::GetUserBands()` converts on the way out.
+  That is what makes a parameter blob portable between products showing
+  different units, and it is why `AppParameters.cpp` writes its bands in a
+  readable unit and calls `Bands::Convert()`.
+- **The scene is built after the model loop.** `app_main()` runs
+  `StartModelLoop()` before `CreateScene()` precisely because the scenes cache
+  `GetUserBands()` at build time, and the container is only populated -- from
+  its defaults, then from the stored blob -- once the model exists.
+
+**A node on the bus can push a new parameter at us.** This is the real Kanardia
+protocol -- the receive half `Private/Indu` implements and the send half Nesis
+drives -- which is why the existing tooling can configure this board:
+
+1. the sender offers a **DDS_BUFFER** (`0x05`) data download, and
+   `CanProcessor::AcceptDownload()` takes it if it fits the 1 kB scratch buffer;
+2. the bytes arrive one 32-bit register per message, `StoreDownloadMessage()`
+   filing each at `GetMessageCode(msg)-1`;
+3. an **MCS_APPLY_BUFFER_DATA** (`0x0E`) message commits it. Register B packs
+   the length above a CRC-16 (`(size << 16) | crc`) and the data index carries
+   a `BufferDownloadCommand`; `Parameter` is the only one we honour.
+
+The buffer is a single `parameter::fbs::ParamItem` flatbuffer -- what
+`ParamStorage::GetParameterFB()` produces. `Parameters::ApplyPushedParameter()`
+looks its `can_id` up in the container and hands it to
+`ParamStorage::ApplyTo()`. A blob naming an id this unit does not show is
+ignored, not an error: a tool pushing a whole panel will name plenty of them.
+
+Two things to know:
+
+- **The apply does not happen on the CAN thread.** `ApplyTo()` resizes the
+  parameter's value vector, which the LVGL task is sampling every frame. So
+  `ConfigureModule()` only publishes the verified bytes, and
+  `app::ApplyPushedParameter()` -- called from the scene's tick, on the LVGL
+  task -- applies, saves and refreshes the cached bands.
+- **A push is saved immediately**, by re-writing the whole container blob. A
+  change that survived only until the next power cycle would be worse than no
+  change at all.
+
+**Sending goes through the same services Nesis uses.** `DialogParameters::
+Transfer()` in `Public/Nesis` is two lines per parameter:
+
+```cpp
+auto vFB = ParamStorage::GetParameterFB(pc.Find(pP->GetId()));
+if(vFB.empty()==false)
+    pU->Download(BufferDownloadCommand::Parameter, vFB);
+```
+
+`UnitInfoBase::Download()` behind that is DDS_BUFFER followed by
+MCS_APPLY_BUFFER_DATA carrying `(size << 16) | crc16`.
+`CanProcessor::PushBuffer()` is that call against the same `OldServices`, which
+is why `USE_CAN_DDS_A` and `USE_CAN_MCS_A` are on: the shared state machine
+does the handshake, the indices, the checksum and the timeouts, and the only
+product-specific part left is `GetDownloadData()` handing out one register at a
+time.
+
+Two things differ from the desktop, both because Nesis blocks and we cannot:
+
+- **The commit waits for the transfer.** `UnitInfoBase::Download()` writes the
+  download and the apply as consecutive statements; here DDS_A runs on its own,
+  so `Pump()` fires the `ConfigureModule()` once the download reaches
+  `DDS_A::sSuccess`.
+- **`OldServices::Update()` needs a real beat.** It posts at most one download
+  message per call, so a once-a-second poke would take two minutes for a
+  368-byte parameter. `Pump()` runs on the model task's 50 ms tick and sends
+  until the controller's transmit queue is full -- 92 messages in about 600 ms.
+
+**`OldServices` is now locked.** It is a plain state machine with no locking of
+its own, reached from the port's receive thread (`Process()`) and the model
+task (`Pump()`, `Update1s()`). Before the sending half existed the overlap was
+harmless; a half-sent download whose response lands mid-`Update()` is not.
+
+`Model::SimulateParameterPush()` packs one edited parameter and pushes it at our
+own node id. In self-test the controller hands every frame back, so the
+console's `P` command drives the whole loop for real -- DDS_A, DDS_B, MCS_A,
+MCS_B, the apply and the NVS write. The tachometer's bands visibly change, and
+survive a reboot.
+
+**The parameter set is saved as one blob.** `Settings::SaveParameters()` /
+`LoadParameters()` wrap `parameter::ParamStorage`, which packs the whole
+container into a single flatbuffer and LZO-compresses it: 451 bytes for our
+three parameters. That is one NVS entry, not one per key -- unlike the options
+-- because that packed form is what the rest of the Kanardia tooling reads and
+writes, and splitting it would make the blob non-portable. `ParamStorage::Load()`
+answers silently on a bad CRC, so `LoadParameters()` proves the blob names at
+least one parameter we hold before applying it.
+
+Bringing `ParamStorage` in pulled miniLZO into the image (`LZO/minilzo.c`, built
+as C and deliberately outside `SRC_COMMON_FILES`, because those get
+`-include KanardiaCommon.h`), plus `Param.cpp`, `ParamContainer.cpp`,
+`ParamFuelLevel.cpp`, `CanIdDetails.cpp` and `CRC-32.cpp`.
+
+**Options live in NVS.** `partitions.csv` carries two 4 MB app slots (`ota_0`,
+`ota_1`) plus `otadata`, so the firmware can be replaced over the air, and a
+24 kB `settings` NVS partition of our own -- separate from the default `nvs`,
+which is IDF's for Wi-Fi and PHY calibration.
+
+`StorageOptions.h/.cpp` keeps one NVS entry per `option::Key`, named
+`opt_<number>`:
+Common already packs each option into a flatbuffer through
+`Container::GetBLOB()` / `SetBLOB()`, and NVS is a key/blob store with its own
+wear levelling and per-entry CRC, so the two meet directly with no framing of
+our own. That is deliberately *not* `Container::Save()`, which packs everything
+into one image behind a size and a CRC -- the right shape for the raw flash the
+other products write to, but here it would mean rewriting every option to
+change one.
+
+`AppOptions.h/.cpp` exists because `option::Container` keeps its item list
+protected: `app::Options` derives from `option::ModelBase` so `Settings` can
+walk the registered keys and their dirty flags. It also registers
+`option::Key::LastKnownCoordinate`, which is what finally makes
+`Model::SaveLastKnownCoordinate()` do something.
+
+Three things to know:
+
+- **The `settings` partition is small because of internal RAM, not flash.**
+  Mounting an NVS partition costs internal RAM roughly in proportion to its
+  size and never returns it. `CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y` moves the
+  page cache and key hash list to PSRAM and is on, but it does not move
+  everything: mounting still costs ~12 kB at 24 kB and ~40 kB at 184 kB.
+  Without it, 184 kB left the CAN thread unable to get its contiguous 32 kB
+  stack and the board aborted at boot with `pthread: Failed to create task`.
+  `partitions.csv` carries the measurements; re-read app_main's `largest block`
+  line after changing the size.
+- **The big stacks are taken first, on purpose.** `Main.cpp` starts the serial
+  console before the model loop, and `StartModelLoop()` starts the CAN port
+  before mounting NVS. Three things each need a contiguous 32 kB -- the LVGL
+  task, the console task, the CAN thread -- and after boot the largest free
+  internal block is about 31 kB. There is no room for a fourth.
+- **Only dirty options are written.** `Settings::Save()` walks the per-key
+  dirty flags; pass `false` to force the whole set out, which is what populates
+  a fresh partition on the first boot and what the console's `w` command does.
 
 ### The canvas must stay ARGB8888
 

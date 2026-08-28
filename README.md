@@ -13,9 +13,10 @@ Tap the screen to cycle the scenes:
 | `scale`     | engine tachometer -- a Kanardia `scale::Style` drawn by `Scale::DrawArc()` |
 | `ias`       | airspeed indicator -- `Scale::DrawArcIAS()`: coloured arcs, white flap band, Vne radial, V-speed marks |
 | `altimeter` | three-pointer altimeter, full-circle scale, hundreds / thousands / ten-thousands hands |
+| `rpm`       | engine and rotor tachometers side by side, scales mirrored `)(`, a marker riding each |
 
-The three instrument scenes are drawn from the shared Kanardia `Public/Common`
-code and read their values from `avio::ModelBase`. A live `ms/frame` readout
+The four instrument scenes are drawn from the shared Kanardia `Public/Common`
+code and read their values from a `parameter::ParameterContainer`. A live `ms/frame` readout
 shows what one ThorVG frame actually costs.
 
 **Status:** running on hardware. Boot, panel, touch, all four scenes, the model
@@ -100,9 +101,11 @@ console out.
 
 | | |
 |---|---|
-| ThorVG frame time | **gauge ~60 ms, ias ~38 ms, scale ~34 ms, altimeter ~28 ms** |
+| ThorVG frame time | **gauge ~60 ms, rpm ~58 ms, ias ~38 ms, scale ~34 ms, altimeter ~28 ms** |
 | Effective UI rate | ~16 fps on the gauge; the instrument scenes reach the 33 ms timer |
-| Free internal heap | ~105 kB between frames, dipping to **~60 kB** while rendering |
+| Free internal heap | low-water mark **~32 kB**; largest contiguous block **~31 kB** |
+| NVS store | 4 option blobs + a 451 B parameter blob, 34 of 756 entries |
+| Parameter push | one parameter as **368 B** over 92 CAN messages in ~600 ms, CRC-16 checked |
 | Free PSRAM | ~28.9 MB |
 
 The frame time is software rasterisation of a 400x400 ARGB8888 canvas on a
@@ -112,6 +115,18 @@ The frame time is software rasterisation of a 400x400 ARGB8888 canvas on a
 ---
 
 ## Things worth knowing before you change anything
+
+**Internal RAM is what the partition table is really trading against.**
+Mounting an NVS partition costs internal RAM roughly in proportion to its size
+and never gives it back, and three things on this board each need a *contiguous*
+32 kB of it: the LVGL task, the console task and the CAN thread.
+`CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y` pushes NVS's page cache and key hash
+list into PSRAM, but only part of the cost follows: mounting still takes ~12 kB
+at 24 kB of partition and ~40 kB at 184 kB. Without that option a 184 kB
+`settings` partition left too little and the board aborted at boot with
+`pthread: Failed to create task`. `Main.cpp` also starts the console before the
+model loop so the big stacks are taken while the heap is still clean.
+[partitions.csv](partitions.csv) carries the measurements.
 
 **LVGL is pinned to `~9.5.0`, and that is load-bearing.** LVGL 9.5 renamed the
 vector API (`lv_vector_dsc_*` → `lv_draw_vector_dsc_*`); `lvgl_cpp` requires
@@ -179,20 +194,23 @@ is the binding's supported way down to the C layer.
 ```
 .claude/skills/run-espp4/  run skill: SKILL.md + driver.py
 CMakeLists.txt           project definition
-partitions.csv           8 MB app + 4 MB storage on 16 MB flash
+partitions.csv           2 x 4 MB OTA app slots + 24 kB settings NVS, on 16 MB flash
 sdkconfig.defaults       target, PSRAM, LVGL, ThorVG and lvgl_cpp configuration
 main/
-  Main.cpp               starts the BSP display, hands over to the scene
+  Main.cpp               starts the BSP display, installs the unit formatter,
+                         hands over to the scene
   AppModel.h/.cpp        concrete avio::ModelBase + its 50 ms processing task
   VectorScene.h/.cpp     the LVGL UI and all ThorVG drawing
   ScaleDrawTvg.h/.cpp    the Kanardia scale on ThorVG; twin of ScaleDrawQt
   CanPortEsp.h/.cpp      can::AbstractCanPort on the P4's TWAI controller
-  CanProcessor.h/.cpp    CANaerospace decode: NOD -> DirectNOD, units container
+  CanProcessor.h/.cpp    CANaerospace decode: NOD, units, pushed-parameter receive
   ApplicationDefines.h   our CAN node id and the services we implement
-  UnitFormat.h/.cpp      values printed via unit::FormatterUtf8 + unit::Convert
+  AppOptions.h/.cpp      the option set we keep, and the keys Settings walks
+  AppParameters.h/.cpp   parameter::ParameterContainer, fed from the NOD
+  StorageOptions.h/.cpp  option and parameter blobs in the `settings` NVS partition
   KanardiaCommon.h       Qt shim so Public/Common compiles for this target
   (build/fonts/)         lv_font_conv output: Kanardia 14/16/20/28 + KanardiaFont.h
-  SerialConsole.h/.cpp   debug console: stats, scene toggle, screenshot
+  SerialConsole.h/.cpp   debug console: stats, scene toggle, save settings, screenshot
   idf_component.yml      BSP + LVGL + lvgl_cpp dependencies
   CMakeLists.txt         Public/Common sources, font generation, RapidJSON workarounds
 ```

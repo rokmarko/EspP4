@@ -26,3 +26,7 @@ core.*
 # --- Generated / vendored tooling ---
 tools/node_modules/
 tools/package*.json
+
+# Byte-compiled Python from the run skill.
+__pycache__/
+*.pyc

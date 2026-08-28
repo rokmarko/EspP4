@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../Kanardia/Code/Branch/v4_3/Public/Common"
+		},
+		{
+			"path": "../Kanardia/Code/Branch/v4_3/Private/Horis/v1"
+		},
+		{
+			"path": "../Kanardia/Code/Branch/v4_3/Public/Nesis/src"
+		}
+	],
+	"settings": {
+		
+	}
+}

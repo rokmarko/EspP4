@@ -69,6 +69,23 @@ extern "C" void app_main(void)
     /* Before anything formats a value -- the scene builds its labels below. */
     InstallUnitFormatter();
 
+    /* Console first, then the model, then the scene.
+     *
+     * The console and the CAN thread each want a 32 kB *contiguous* stack out
+     * of internal RAM, and the model loop mounts the NVS settings partition on
+     * its way past -- so the big stacks are taken while the heap is still
+     * clean. The console failing is especially bad, since it is the only way
+     * to see anything from the host.
+     *
+     * The scene comes last because it reads its colour bands out of the
+     * parameter container, and that is only populated -- from its defaults and
+     * then from the stored blob -- once the model loop has run. */
+    demo::StartSerialConsole();
+
+    if (!app::StartModelLoop()) {
+        ESP_LOGE(TAG, "model loop failed to start");
+    }
+
     bsp_display_lock(UINT32_MAX);
     const bool ok = demo::CreateScene();
     bsp_display_unlock();
@@ -80,14 +97,10 @@ extern "C" void app_main(void)
 
     bsp_display_backlight_on();
 
-    /* The shared Kanardia flight model, ticking on its own task from here on. */
-    if (!app::StartModelLoop()) {
-        ESP_LOGE(TAG, "model loop failed to start");
-    }
-
-    demo::StartSerialConsole();
-
-    ESP_LOGI(TAG, "free heap: %u B internal, %u B PSRAM",
+    /* Largest block, not just the total: the 32 kB stacks above need it
+     * contiguous, and that is what runs out first. */
+    ESP_LOGI(TAG, "free heap: %u B internal (largest block %u B), %u B PSRAM",
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
 }

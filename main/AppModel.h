@@ -9,17 +9,19 @@
  * above/below detectors that answer IsFlying() / IsEngineRunning() / IsMoving().
  * It is abstract -- the products supply storage, options and autopilot wiring.
  *
- * The ESP32-P4 demo board has no CAN transceiver, no GNSS receiver and no
- * options storage, so those hooks answer "nothing connected" and the NOD is fed
- * from Simulate(). Everything above the NOD is the real Common code, running
- * unmodified.
+ * The ESP32-P4 demo board has no GNSS receiver, so that hook answers "nothing
+ * connected" and the NOD is fed over CAN. Options do have somewhere to live:
+ * app::Settings keeps them as blobs in the `settings` NVS partition.
+ * Everything above the NOD is the real Common code, running unmodified.
  */
 
 #include "KanardiaCommon.h"
 
+#include "AppOptions.h"
+#include "AppParameters.h"
+
 #include "Avio/Model/ModelBase.h"
 #include "CanAerospace/CanNOD.h"
-#include "Option/OptionsModel.h"
 
 namespace app {
 
@@ -45,6 +47,25 @@ public:
     /** Direct access to the NOD, for whoever plays the part of the CAN bus. */
     can::DirectNOD &GetNODStore() { return m_nodOwned; }
 
+    /** The stored options, for app::Settings to read and write. */
+    Options &GetOptions() { return m_options; }
+
+    /**
+     * The instrument parameters. They read from this model's own NOD, so the
+     * scenes get filtered values in the pilot's units without touching either.
+     */
+    Parameters &GetParameters() { return m_params; }
+    const Parameters &GetParameters() const { return m_params; }
+
+    /**
+     * Seed the model's last-known position from what came out of NVS.
+     *
+     * ModelBase starts its own tracker at whatever it was constructed with;
+     * this hands it the coordinate the previous flight ended at, which is the
+     * whole point of storing it. Call once, after the options are loaded.
+     */
+    void RestoreLastKnownCoordinate();
+
     /**
      * Stand in for an ECU on the bus: transmit one set of CANaerospace NOD
      * frames. In self-test mode the controller hands them straight back, so
@@ -56,6 +77,23 @@ public:
      * @param fSeconds  seconds since boot, drives the synthetic engine run.
      */
     void Simulate(float fSeconds);
+
+    /**
+     * Stand in for a configuration tool: push a modified engine-rpm parameter
+     * at ourselves over the bus.
+     *
+     * Sends the real thing -- a DDS_BUFFER download carrying one
+     * `parameter::fbs::ParamItem` flatbuffer, then an MCS_APPLY_BUFFER_DATA
+     * message with the buffer's length and CRC-16. In self-test the controller
+     * hands every frame back, so it arrives through DDS_B and MCS_B exactly as
+     * a real node's push would, and the tachometer's bands visibly change.
+     *
+     * Self-test only, for the same reason Simulate() is.
+     *
+     * @return false if the port is not in self-test, or a frame could not be
+     *         posted.
+     */
+    bool SimulateParameterPush();
 
     /**
      * Announce ourselves the way every Kanardia module does, once a second.
@@ -103,7 +141,10 @@ private:
     /** Serial reported in our sign-of-life. No real unit carries this one. */
     static constexpr uint32_t DEMO_SERIAL = 0xE5B04;
 
-    option::ModelBase m_options;
+    Options    m_options;
+    /* Constructed from m_nodOwned, which NodOwner has already built: bases
+     * before members, and NodOwner is the first base. */
+    Parameters m_params{m_nodOwned};
 };
 
 // --------------------------------------------------------------------------
@@ -124,6 +165,34 @@ class CanPortEsp *GetCanPort();
 
 /** The CANaerospace processor, or nullptr before StartModelLoop(). */
 class CanProcessor *GetCanProcessor();
+
+/**
+ * Take a parameter another node pushed over CAN, apply it and save it.
+ *
+ * Call from the thread that reads the parameters -- the LVGL task, via the
+ * scene's tick. Applying resizes the parameter's value vector, so it must not
+ * run while another thread is sampling values; and re-saving the whole
+ * container keeps the pushed change across a power cycle.
+ *
+ * @return the can::Id that changed, or can::Id::Invalid if nothing was
+ *         waiting. A caller that caches band data should refresh it when this
+ *         answers with an id.
+ */
+can::Id ApplyPushedParameter();
+
+/** How many parameter pushes the bus has delivered since boot. */
+uint32_t ParameterPushCount();
+
+/** Whether an outgoing buffer push is still in flight. */
+bool IsPushActive();
+
+/**
+ * How many option blobs Settings read back out of NVS at boot.
+ *
+ * Zero on the very first boot after a flash erase (the defaults are written
+ * instead); the registered option count on every boot after that.
+ */
+uint32_t OptionsLoaded();
 
 /**
  * Smallest free stack the model task has ever had, in bytes.

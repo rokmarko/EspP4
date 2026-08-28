@@ -1,5 +1,50 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, ,        8M,
-storage,  data, spiffs,  ,        4M,
+# 16 MB flash. Two app slots so the firmware can be replaced over the air, and
+# a settings partition of our own so option blobs never share space with the
+# Wi-Fi calibration data IDF keeps in the default `nvs`.
+#
+#   nvs        24 kB   IDF's own: Wi-Fi and PHY calibration
+#   phy_init    4 kB
+#   otadata     8 kB   which app slot boots next
+#   settings   24 kB   option blobs, one NVS entry per option::Key
+#                      -- see main/Settings.cpp
+#   ota_0       4 MB   the app is ~1.1 MB today
+#   ota_1       4 MB
+#   storage  7.88 MB   unused so far
+#
+# `settings` is small on purpose, and the reason is internal RAM rather than
+# flash. Mounting an NVS partition costs internal RAM that is never given back,
+# and three things on this board each need a *contiguous* 32 kB of it: the LVGL
+# task, the console task and the CAN thread.
+#
+# CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y moves NVS's page cache and key hash
+# list to PSRAM, but it does not move everything -- measured on this board,
+# free internal RAM after boot:
+#
+#   settings not mounted   ->  85 kB free, largest block 31.7 kB
+#   settings    24 kB      ->  73 kB free, largest block 31.7 kB
+#   settings   184 kB      ->  45 kB free, largest block 23.5 kB
+#
+# So mounting still costs ~12 kB at 24 kB and ~40 kB at 184 kB, roughly 700 B
+# per extra 4 kB sector. Without the PSRAM option the 184 kB case was worse
+# still: the CAN thread could not be created and the board aborted at boot with
+# "pthread: Failed to create task".
+#
+# 24 kB is the same size IDF gives its own `nvs` and holds 756 entries; the
+# option blobs use 17. Do not enlarge it without re-reading app_main's
+# "largest block" line afterwards.
+#
+# That leaves a 32 kB hole before ota_0, which has to start on a 64 kB
+# boundary. Flash is the resource this project has to spare.
+#
+# Offsets are spelled out because a mistake here bricks the board quietly.
+# gen_esp32part.py rejects a trailing comment on a partition line, hence the
+# table above.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+phy_init,   data, phy,      0xf000,    0x1000,
+otadata,    data, ota,      0x10000,   0x2000,
+settings,   data, nvs,      0x12000,   0x6000,
+ota_0,      app,  ota_0,    0x20000,   0x400000,
+ota_1,      app,  ota_1,    0x420000,  0x400000,
+storage,    data, spiffs,   0x820000,  0x7e0000,

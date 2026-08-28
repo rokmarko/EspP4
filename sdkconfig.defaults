@@ -17,6 +17,15 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# --- NVS ----------------------------------------------------------------------
+# Put NVS's page cache and key hash list in PSRAM. Those are the allocations
+# that scale with the settings partition's size, and internal RAM is the
+# tightest resource here. heap_caps_malloc_prefer() falls back to internal RAM
+# if PSRAM is full, so this cannot fail closed. It costs NVS speed -- the CPU
+# reaches the cache over SPI -- which is free for us: NVS is touched once at
+# boot and again only when an option changes.
+CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y
+
 # --- PSRAM --------------------------------------------------------------------
 # The 720x720 frame buffers and the ARGB8888 vector canvas all live here.
 CONFIG_SPIRAM=y

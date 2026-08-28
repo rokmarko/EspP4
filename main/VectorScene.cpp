@@ -19,6 +19,7 @@
 #include "AppModel.h"
 #include "KanardiaFont.h"
 #include "ScaleDrawTvg.h"
+#include "AppParameters.h"
 #include "Avio/Format/AvioFormat.h"
 #include "Parameter/ParamBands.h"
 #include "Parameter/ParamFormat.h"
@@ -58,6 +59,19 @@ constexpr const char *TAG = "scene";
 constexpr int32_t  CANVAS_SIZE = 400;
 constexpr float    CTR         = CANVAS_SIZE / 2.0f;
 constexpr uint32_t FRAME_MS    = 33;   /* ~30 vector frames/s */
+
+/**
+ * One parameter's colour bands, in the unit the pilot reads.
+ *
+ * app_main() starts the model loop before building the scene precisely so
+ * this is populated; the nullptr branch only guards a scene built without one.
+ */
+parameter::Bands ParameterBands(can::Id eId)
+{
+    const app::Model *pModel = app::GetModel();
+    return pModel != nullptr ? pModel->GetParameters().GetUserBands(eId)
+                             : parameter::Bands();
+}
 
 /**
  * The unit's own glyph, falling back to its plain ASCII signature.
@@ -105,6 +119,14 @@ constexpr float ARC_SWEEP = 270.0f;
 
 constexpr uint32_t BG_COLOR = 0x080B14;
 
+/* The dual tachometer's two halves. Each marker and its readout box share a
+ * colour, which is what says which box belongs to which scale -- both read
+ * "RPM" and the numbers alone would not tell them apart. */
+constexpr uint32_t ENGINE_RGB = 0xFF5C8A;
+constexpr uint32_t ROTOR_RGB  = 0x5CE1B0;
+/* Every other scene's box. */
+constexpr uint32_t BOX_RGB    = 0x3D5A9E;
+
 /** lv_color32_t is laid out blue, green, red, alpha. */
 constexpr lv_color32_t Rgba(uint32_t rgb, uint8_t a = 0xFF)
 {
@@ -139,7 +161,7 @@ Pt Polar(float deg, float radius)
 
 class Scene {
 public:
-    enum class Mode { Gauge, Scale, Ias, Altimeter };
+    enum class Mode { Gauge, Scale, Ias, Altimeter, Rpm };
 
     bool Build();
 
@@ -151,12 +173,28 @@ private:
     void Tick();
     void DrawGauge(VectorDraw &dsc, VectorPath &path);
 
+    /** Re-read every cached band set from the parameter container. */
+    void RefreshBands();
+
     void BuildScale();
     void DrawScale(scale::tvg::Painter &P);
     void BuildIas();
     void DrawIas(scale::tvg::Painter &P);
     void BuildAltimeter();
     void DrawAltimeter(scale::tvg::Painter &P);
+    void BuildRpm();
+    void DrawRpm(scale::tvg::Painter &P);
+
+    /**
+     * Triangular marker riding @p arc at relative position @p fRel.
+     *
+     * A needle would have to be rooted at the arc's own centre, which on a
+     * side-by-side face sits near the panel edge. A marker on the scale itself
+     * is what these read like anyway: it sits just off the convex side and
+     * points back at the dashes.
+     */
+    void DrawArcMarker(scale::tvg::Painter &P, const scale::Arc2D &arc,
+                       float fRel, float fLength, float fHalfWidth, uint32_t rgb);
 
     /** Dial face disc, shared by the three instrument scenes. */
     void DrawFace(scale::tvg::Painter &P);
@@ -172,6 +210,8 @@ private:
     std::optional<Canvas>  m_canvas;
     std::optional<Label>   m_title;
     std::optional<Label>   m_valueLabel;
+    /* Second readout, used only by the dual tachometer -- one box per scale. */
+    std::optional<Label>   m_valueLabel2;
     std::optional<Label>   m_stats;
     std::optional<Label>   m_hint;
     std::optional<Label>   m_glyphs;
@@ -199,10 +239,22 @@ private:
     scale::style::Style    m_altStyle;
     scale::Arc2D           m_altArc;
 
+    /* The dual tachometer: engine on the left, rotor on the right, the two
+     * scales mirrored so their faces turn away from each other -- ")(". The
+     * engine side shares m_bands with the round tachometer; it is the same
+     * parameter in the same user unit. */
+    parameter::Bands       m_rotBands;
+    scale::Markings        m_engRpmMarkings;
+    scale::Markings        m_rotRpmMarkings;
+    scale::style::Style    m_rpmStyle;
+    scale::Arc2D           m_engRpmArc;
+    scale::Arc2D           m_rotRpmArc;
+
     Mode  m_eMode      = Mode::Gauge;
     float m_fPhase     = 0.0f;   /* degrees, wraps at 360 */
     float m_fValue     = 0.0f;   /* 0..100, what the gauge shows */
     float m_fRpm       = 0.0f;   /* engine rpm the tachometer needle points at */
+    float m_fRotorRpm  = 0.0f;   /* rotor rpm, the dual tachometer's right half */
     float m_fIasKmh    = 0.0f;   /* indicated airspeed, user units */
     float m_fAltFeet   = 0.0f;   /* baro-corrected altitude, user units */
     float m_fRenderMs = 0.0f;   /* smoothed cost of one ThorVG frame */
@@ -334,15 +386,24 @@ void Scene::DrawGauge(VectorDraw &dsc, VectorPath &path)
  * one: bands in user units, markings in scale units, and a style holding the
  * dash/band/label geometry. Nothing here is ESP- or LVGL-specific.
  */
+void Scene::RefreshBands()
+{
+    m_bands    = ParameterBands(can::Id::EngineRPM_1);
+    m_rotBands = ParameterBands(can::Id::RotorRPM_1);
+    m_iasBands = ParameterBands(can::Id::IndicatedAirspeed);
+    m_altBands = ParameterBands(can::Id::BaroCorrectedAltitude);
+    ESP_LOGI(TAG, "scale bands refreshed from the parameter container");
+}
+
+// -----------------------------------------------------------------------------
+
 void Scene::BuildScale()
 {
-    /* Bands, in user units (rpm). The first band carries no colour, so no arc
-     * is drawn below idle -- only dashes and labels. */
-    m_bands.SetLow(0.0f);
-    m_bands.Append(1400.0f, parameter::Color::NoColor, 0.0f);
-    m_bands.Append(2500.0f, parameter::Color::Green,   0.0f);
-    m_bands.Append(2800.0f, parameter::Color::Yellow,  0.0f);
-    m_bands.Append(3000.0f, parameter::Color::Red,     0.0f);
+    /* Bands come from the parameter, already converted to the unit the pilot
+     * reads. They are cached because DrawArc() takes a reference and
+     * GetUserBands() builds a new Bands every time it is called; a blob load
+     * happens before the scene is built, so this never goes stale. */
+    m_bands = ParameterBands(can::Id::EngineRPM_1);
 
     /* Markings are in scale units: rpm/100, so the scale reads 0 .. 30.
      * major 5, five minors per major, a label on every major, no decimals. */
@@ -489,13 +550,9 @@ void Scene::DrawScale(scale::tvg::Painter &P)
  */
 void Scene::BuildIas()
 {
-    /* Bands in user units (km/h). The red band is not drawn as an arc --
+    /* In km/h, from the parameter. The red band is not drawn as an arc --
      * DrawArcIAS() marks its low edge with a radial Vne dash instead. */
-    m_iasBands.SetLow(40.0f);
-    m_iasBands.Append( 75.0f, parameter::Color::NoColor, 0.0f);
-    m_iasBands.Append(200.0f, parameter::Color::Green,   0.0f);
-    m_iasBands.Append(250.0f, parameter::Color::Yellow,  0.0f);
-    m_iasBands.Append(260.0f, parameter::Color::Red,     0.0f);
+    m_iasBands = ParameterBands(can::Id::IndicatedAirspeed);
 
     /* Scale units are km/h (multiples 1): major every 20, minor every 10,
      * a label every 40. */
@@ -584,8 +641,7 @@ void Scene::DrawIas(scale::tvg::Painter &P)
 void Scene::BuildAltimeter()
 {
     /* One uncoloured band spanning the revolution: no arcs, just the scale. */
-    m_altBands.SetLow(0.0f);
-    m_altBands.Append(1000.0f, parameter::Color::NoColor, 0.0f);
+    m_altBands = ParameterBands(can::Id::BaroCorrectedAltitude);
 
     /* Scale units are hundreds of feet, so the face reads 0..10 and the
      * labels come out 0..9. Five minors per major = one every 20 ft. */
@@ -643,11 +699,132 @@ void Scene::DrawAltimeter(scale::tvg::Painter &P)
 }
 
 // -----------------------------------------------------------------------------
+//  Scene 5: engine and rotor rpm, side by side
+// -----------------------------------------------------------------------------
+
+/**
+ * A helicopter's dual tachometer: two scales mirrored about the panel's
+ * vertical axis, so their arcs bow towards each other and their dashes and
+ * labels face outwards -- the ")(" layout.
+ *
+ * Each half is an ordinary Scale::DrawArc(); all that makes the pair is where
+ * the two Arc2D centres sit and which way the spans run. The centres are
+ * pushed well outside the ring the arcs draw, so only the near flank of each
+ * circle lands on the panel: the right flank of the left circle, ")", and the
+ * left flank of the right one, "(".
+ */
+void Scene::BuildRpm()
+{
+    m_bands    = ParameterBands(can::Id::EngineRPM_1);
+    m_rotBands = ParameterBands(can::Id::RotorRPM_1);
+
+    /* Engine reads 0..30 in hundreds, rotor 0..6. Both get a label on every
+     * major so the two columns line up. */
+    m_engRpmMarkings = scale::Markings(5.0f, 5, 0.0f, 5.0f, 100.0f, 0);
+    m_rotRpmMarkings = scale::Markings(1.0f, 5, 0.0f, 1.0f, 100.0f, 0);
+
+    /* Shorter dashes and a smaller face than the round tachometer: the two
+     * scales have to share the width, and the labels sit between each arc and
+     * its own centre -- which is outboard, so they end up on the outer edges. */
+    const scale::style::Dash   major {16.0f, 3.0f};
+    const scale::style::Dash   minor { 9.0f, 2.0f};
+    const scale::style::Band   band  { 9.0f};
+    const scale::style::Font   font  {"Kanardia", 16, false};
+    const scale::style::Offset offset{
+        -26.0f,   /* major dash */
+        -19.0f,   /* minor dash */
+        -46.0f,   /* label centre */
+          0.0f,   /* band centred on the arc */
+    };
+    m_rpmStyle = scale::style::Style(major, minor, band, font, offset);
+
+    /* R + GAP from the centre line puts each arc's crown GAP short of it, so
+     * the two crowns leave a clear corridor down the middle for the readouts. */
+    constexpr float R    = 145.0f;
+    constexpr float GAP  = 45.0f;
+    constexpr float SPAN = 66.0f;    /* half the span, degrees either side */
+
+    /* Left: the right flank of a circle centred off to the left, drawn from
+     * bottom to top so the value grows upwards. That is ")". */
+    m_engRpmArc = scale::Arc2D(scale::Vec2D(CTR - (R + GAP), CTR), R,
+                               common::Rad(-SPAN), common::Rad(2.0f * SPAN));
+
+    /* Right: mirrored. The left flank of a circle centred off to the right,
+     * again bottom to top, so the span runs the other way. That is "(". */
+    m_rotRpmArc = scale::Arc2D(scale::Vec2D(CTR + (R + GAP), CTR), R,
+                               common::Rad(180.0f + SPAN), common::Rad(-2.0f * SPAN));
+}
+
+void Scene::DrawArcMarker(scale::tvg::Painter &P, const scale::Arc2D &arc,
+                          float fRel, float fLength, float fHalfWidth, uint32_t rgb)
+{
+    VectorDraw &dsc  = P.GetDraw();
+    VectorPath &path = P.GetPath();
+
+    const float a  = arc.GetAngleBounded(fRel);
+    const float cx = arc.GetCenter().GetX();
+    const float cy = arc.GetCenter().GetY();
+    const float r  = arc.GetRadius();
+
+    /* Screen y grows downward while Arc2D angles grow counter-clockwise, so
+     * the sine is negated -- the same convention the rest of this file uses. */
+    auto at = [cx, cy](float fRadius, float fAngle) {
+        return Pt{cx + fRadius * std::cos(fAngle), cy - fRadius * std::sin(fAngle)};
+    };
+
+    /* Apex on the arc, base out on the convex side -- towards the panel's
+     * middle, away from this arc's own centre. The base corners are given as
+     * an angular offset so the marker follows the curve. */
+    const float fBase = r + 3.0f + fLength;
+    const float dA    = fHalfWidth / fBase;
+
+    const Pt apex = at(r + 2.0f, a);
+    const Pt b1   = at(fBase, a + dA);
+    const Pt b2   = at(fBase, a - dA);
+
+    path.move_to(apex.x, apex.y);
+    path.line_to(b1.x, b1.y);
+    path.line_to(b2.x, b2.y);
+    path.close();
+
+    dsc.set_stroke_opa(LV_OPA_TRANSP);
+    dsc.set_fill_color(Rgba(rgb));
+    dsc.set_fill_opa(LV_OPA_COVER);
+    dsc.add_path(path);
+    path.clear();
+}
+
+void Scene::DrawRpm(scale::tvg::Painter &P)
+{
+    DrawFace(P);
+
+    scale::tvg::Scale::DrawArc(P, m_engRpmArc, m_engRpmMarkings, m_bands,
+                               m_colors, m_rpmStyle);
+    scale::tvg::Scale::DrawArc(P, m_rotRpmArc, m_rotRpmMarkings, m_rotBands,
+                               m_colors, m_rpmStyle);
+
+    /* DrawArc() flushed its vector work before queueing labels, so the markers
+     * added here land on top of everything. */
+    DrawArcMarker(P, m_engRpmArc, m_bands.GetRange().GetRelativeBounded(m_fRpm),
+                  22.0f, 11.0f, ENGINE_RGB);
+    DrawArcMarker(P, m_rotRpmArc, m_rotBands.GetRange().GetRelativeBounded(m_fRotorRpm),
+                  22.0f, 11.0f, ROTOR_RGB);
+
+    P.Flush();
+}
+
+// -----------------------------------------------------------------------------
 //  Frame loop
 // -----------------------------------------------------------------------------
 
 void Scene::Tick()
 {
+    /* A node on the bus may have pushed a new parameter. This runs on the LVGL
+     * task, which is the thread that samples the parameters -- applying resizes
+     * their value vectors, so it cannot happen on the CAN receive thread. */
+    if (app::ApplyPushedParameter() != can::Id::Invalid)
+        RefreshBands();
+
     m_fPhase += 1.1f;
     if (m_fPhase >= 360.0f) m_fPhase -= 360.0f;
 
@@ -657,15 +834,20 @@ void Scene::Tick()
      * its DirectNOD on the 50 ms tick and ModelBase folds it in. Fall back to
      * the sine sweep only if the model loop never started. */
     if (const app::Model *pModel = app::GetModel()) {
-        /* The model holds air data in the SI units CANaerospace carries;
-         * unit::Convert() does the arithmetic so no factors live here. */
-        m_fRpm     = pModel->GetEngineRPM();
-        m_fIasKmh  = unit::Convert(pModel->GetIAS(), unit::Key::m_s, unit::Key::km_h);
-        m_fAltFeet = unit::Convert(pModel->GetAltitude(), unit::Key::m, unit::Key::feet);
+        /* Straight out of the parameter container: each parameter pulls its
+         * own value from the NOD, low-pass filters it the way Common filters
+         * that function, and hands it back in the pilot's unit. No conversion
+         * factors and no model getters left here. */
+        const app::Parameters &params = pModel->GetParameters();
+        m_fRpm     = params.GetUserValue(can::Id::EngineRPM_1);
+        m_fRotorRpm = params.GetUserValue(can::Id::RotorRPM_1);
+        m_fIasKmh  = params.GetUserValue(can::Id::IndicatedAirspeed);
+        m_fAltFeet = params.GetUserValue(can::Id::BaroCorrectedAltitude);
     }
     else {
         m_fRpm     = m_bands.GetRange().GetLow()
                    + m_bands.GetRange().GetSpan() * m_fValue / 100.0f;
+        m_fRotorRpm = 380.0f + 2.0f * m_fValue;
         m_fIasKmh  = -20.0f + 2.2f * m_fValue;
         m_fAltFeet = 150.0f * m_fValue;
     }
@@ -691,6 +873,7 @@ void Scene::Tick()
             case Mode::Scale:     DrawScale(P);     break;
             case Mode::Ias:       DrawIas(P);       break;
             case Mode::Altimeter: DrawAltimeter(P); break;
+            case Mode::Rpm:       DrawRpm(P);       break;
             default: break;
         }
     }
@@ -725,6 +908,14 @@ void Scene::Tick()
             m_valueLabel->set_text(
                 Readout(m_fAltFeet, Function::Altitude, unit::Key::feet).c_str());
             break;
+        case Mode::Rpm:
+            /* One box per scale, engine left and rotor right, matching the
+             * side they belong to. */
+            m_valueLabel->set_text(
+                Readout(m_fRpm, Function::EngineRPM, unit::Key::RPM).c_str());
+            m_valueLabel2->set_text(
+                Readout(m_fRotorRpm, Function::RotorRPM, unit::Key::RPM).c_str());
+            break;
     }
 
     m_canvas->invalidate();
@@ -737,6 +928,7 @@ const char *Scene::ModeName() const
         case Mode::Scale:     return "scale";
         case Mode::Ias:       return "ias";
         case Mode::Altimeter: return "altimeter";
+        case Mode::Rpm:       return "rpm";
     }
     return "?";
 }
@@ -747,7 +939,8 @@ void Scene::NextMode()
         case Mode::Gauge:     m_eMode = Mode::Scale;     break;
         case Mode::Scale:     m_eMode = Mode::Ias;       break;
         case Mode::Ias:       m_eMode = Mode::Altimeter; break;
-        case Mode::Altimeter: m_eMode = Mode::Gauge;     break;
+        case Mode::Altimeter: m_eMode = Mode::Rpm;       break;
+        case Mode::Rpm:       m_eMode = Mode::Gauge;     break;
     }
 
     /* The readout has to dodge whatever each face already puts nearby. The ASI
@@ -761,10 +954,21 @@ void Scene::NextMode()
             case Mode::Scale:     return 142;
             case Mode::Ias:       return -46;
             case Mode::Altimeter: return  66;
+            case Mode::Rpm:       return 150;
         }
         return 0;
     }();
-    m_valueLabel->align(Align::Center, 0, iOffsetY);
+
+    /* The dual tachometer needs two boxes, one under each scale, and a smaller
+     * face to fit them side by side under a 400 px canvas. Every other scene
+     * uses one centred box at the full size. */
+    const bool bDual = (m_eMode == Mode::Rpm);
+    m_valueLabel->style()
+        .text_font(bDual ? &lv_font_kanardia_20 : &lv_font_kanardia_28)
+        .border_color(Color(bDual ? ENGINE_RGB : BOX_RGB));
+    m_valueLabel->align(Align::Center, bDual ? -72 : 0, iOffsetY);
+    m_valueLabel2->style().opa(bDual ? Opacity::Cover : Opacity::Transparent);
+    m_valueLabel2->align(Align::Center, 72, iOffsetY);
     m_glyphs->style().opa(m_eMode == Mode::Gauge ? Opacity::Cover : Opacity::Transparent);
     m_hint->set_text_fmt("tap  -  %s", ModeName());
     ESP_LOGI(TAG, "mode -> %s", ModeName());
@@ -779,6 +983,7 @@ bool Scene::Build()
     BuildScale();
     BuildIas();
     BuildAltimeter();
+    BuildRpm();
 
     m_screen.emplace(Screen::active());
     m_screen->style().bg_color(Color(BG_COLOR)).bg_opa(Opacity::Cover);
@@ -819,6 +1024,23 @@ bool Scene::Build()
         .border_width(2)
         .border_opa(Opacity::Cover);
     m_valueLabel->align(Align::Center, 0, 78);
+
+    /* The dual tachometer's second box. Same styling, one size down, and
+     * transparent until that scene is on. */
+    m_valueLabel2.emplace(*m_screen, "0");
+    m_valueLabel2->style()
+        .text_font(&lv_font_kanardia_20)
+        .text_color(Color(0xE8F4FF))
+        .bg_color(Color(0x0B1222))
+        .bg_opa(Opacity::Cover)
+        .radius(10)
+        .pad_hor(14)
+        .pad_ver(6)
+        .border_color(Color(ROTOR_RGB))
+        .border_width(2)
+        .border_opa(Opacity::Cover)
+        .opa(Opacity::Transparent);
+    m_valueLabel2->align(Align::Center, 72, 150);
 
     m_stats.emplace(*m_screen, "");
     m_stats->style().text_font(&lv_font_kanardia_16).text_color(Color(0x6F86B5));

@@ -7,6 +7,8 @@
  *   h   help
  *   i   print one <<<STATS ...>>> line
  *   t   toggle scene, as a screen tap would
+ *   w   write the option blobs to NVS, then print <<<SAVE ...>>>
+ *   P   push a parameter at ourselves over CAN (self-test only)
  *   s   screenshot at half resolution  (fast, ~360x360)
  *   S   screenshot at full resolution  (720x720, several seconds)
  *
@@ -22,8 +24,10 @@
 #ifndef DEMO_NO_SERIAL_CONSOLE
 
 #include "AppModel.h"
+#include "AppOptions.h"
 #include "CanPortEsp.h"
 #include "CanProcessor.h"
+#include "StorageOptions.h"
 #include "VectorScene.h"
 
 #include "driver/usb_serial_jtag.h"
@@ -140,7 +144,7 @@ void SinkToBase64(const uint8_t *data, size_t len, void *ctx)
 
 void PrintStats()
 {
-    char line[384];
+    char line[448];
     const int tenths = demo::FrameTimeTenths();
 
     /* Model fields prove the processing loop is actually ticking: rpm comes
@@ -152,10 +156,15 @@ void PrintStats()
     const int  iEng    = pModel ? (pModel->IsEngineRunning() ? 1 : 0) : -1;
     const int  iMoving = pModel ? (pModel->IsMoving() ? 1 : 0) : -1;
 
+    /* nvs_opt is how many option blobs came back at boot; a fresh flash reads
+     * 0 and writes the defaults, every boot after that reads them all. */
+    const app::Settings::Usage use = app::GetSettings().GetUsage();
+
     std::snprintf(line, sizeof(line),
                   "<<<STATS scene=%s frame_ms=%d.%d heap_int=%u heap_psram=%u "
                   "rpm=%d eng=%d moving=%d model_stack=%u "
-                  "can=%s can_rx=%u can_tx=%u can_nod=%u can_alive=%d can_ident=%d can_err=%u can_state=%u>>>\n",
+                  "can=%s can_rx=%u can_tx=%u can_nod=%u can_alive=%d can_ident=%d can_err=%u can_state=%u "
+                  "nvs=%s nvs_opt=%u nvs_used=%u/%u heap_int_min=%u can_push=%u>>>\n",
                   demo::SceneName(), tenths / 10, tenths % 10,
                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
@@ -168,7 +177,64 @@ void PrintStats()
                   pProc ? pProc->GetAliveUnitCount() : -1,
                   pProc ? pProc->GetIdentifiedUnitCount() : -1,
                   static_cast<unsigned>(pPort ? pPort->GetErrCount() : 0),
-                  static_cast<unsigned>(pPort ? pPort->GetBusState() : 0));
+                  static_cast<unsigned>(pPort ? pPort->GetBusState() : 0),
+                  use.uTotal ? "open" : "off",
+                  static_cast<unsigned>(app::OptionsLoaded()),
+                  static_cast<unsigned>(use.uUsed),
+                  static_cast<unsigned>(use.uTotal),
+                  /* Low-water mark since boot. heap_int is a snapshot taken at
+                   * a random point in a ThorVG frame and swings by tens of kB;
+                   * this is the figure that says whether the margin is real. */
+                  static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(app::ParameterPushCount()));
+    WriteStr(line);
+}
+
+void SaveSettings()
+{
+    app::Model    *pModel   = app::GetModel();
+    app::Settings &settings = app::GetSettings();
+
+    if (pModel == nullptr || settings.IsOpen() == false) {
+        WriteStr("<<<SAVE ok=0 written=0>>>\n");
+        return;
+    }
+
+    /* The whole set, not just what is dirty: nothing on this board changes an
+     * option by itself, so a dirty-only save would write nothing and prove
+     * nothing. Reboot afterwards and check nvs_opt in <<<STATS>>>. */
+    const uint32_t uWritten = settings.Save(pModel->GetOptions(), false);
+    const app::Settings::Usage use = settings.GetUsage();
+
+    char line[128];
+    std::snprintf(line, sizeof(line), "<<<SAVE ok=%d written=%u used=%u/%u>>>\n",
+                  uWritten > 0 ? 1 : 0, static_cast<unsigned>(uWritten),
+                  static_cast<unsigned>(use.uUsed),
+                  static_cast<unsigned>(use.uTotal));
+    WriteStr(line);
+}
+
+void PushParameter()
+{
+    app::Model *pModel = app::GetModel();
+    if (pModel == nullptr) {
+        WriteStr("<<<PUSH ok=0 pushes=0>>>\n");
+        return;
+    }
+
+    const bool bSent = pModel->SimulateParameterPush();
+
+    /* The transfer is asynchronous now: DDS_A posts a burst per 50 ms tick,
+     * then the commit, then the apply on the LVGL task. Wait for the services
+     * to go idle rather than guessing at a delay. */
+    for (int i = 0; i < 60 && app::IsPushActive(); ++i)
+        vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(200));   /* and one more scene tick for the apply */
+
+    char line[96];
+    std::snprintf(line, sizeof(line), "<<<PUSH ok=%d pushes=%u>>>\n",
+                  bSent ? 1 : 0,
+                  static_cast<unsigned>(app::ParameterPushCount()));
     WriteStr(line);
 }
 
@@ -202,7 +268,7 @@ void Screenshot(int step)
 
 void Help()
 {
-    WriteStr("<<<HELP h=help i=stats t=toggle s=shot-half S=shot-full>>>\n");
+    WriteStr("<<<HELP h=help i=stats t=toggle w=save-settings P=push-param s=shot-half S=shot-full>>>\n");
 }
 
 void ConsoleTask(void *)
@@ -217,6 +283,8 @@ void ConsoleTask(void *)
             case 'i': PrintStats();         break;
             case 't': demo::ToggleScene();
                       PrintStats();         break;
+            case 'w': SaveSettings();       break;
+            case 'P': PushParameter();      break;
             case 's': Screenshot(2);        break;
             case 'S': Screenshot(1);        break;
             case '\r':
@@ -245,7 +313,19 @@ void StartSerialConsole()
      * output cannot interleave mid-byte. */
     usb_serial_jtag_vfs_use_driver();
 
-    xTaskCreate(ConsoleTask, "console", CONSOLE_TASK_STACK, nullptr, 4, nullptr);
+    /* Checked, because a silent failure here looks exactly like a dead board:
+     * no <<<CONSOLE ready>>>, no error, and the driver on the host reports
+     * only that it got nothing back. The stack is large because
+     * lv_snapshot_take() draws on the calling thread, and 32 kB has to be
+     * *contiguous* -- if this ever fails, something mounted or allocated ahead
+     * of it fragmented internal RAM. */
+    if (xTaskCreate(ConsoleTask, "console", CONSOLE_TASK_STACK,
+                    nullptr, 4, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "could not create the console task (%u B stack); "
+                      "largest free internal block is %u B",
+                 static_cast<unsigned>(CONSOLE_TASK_STACK),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    }
 }
 
 } // namespace demo

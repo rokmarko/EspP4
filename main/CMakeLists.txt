@@ -30,6 +30,22 @@ set(SRC_PARAM_FILES
     ${COMMON}/Parameter/ParamFunction.cpp
     ${COMMON}/Parameter/ParamFormat.cpp
     ${COMMON}/Parameter/ParamUnitGroup.cpp
+    # parameter::Parameter and the container that owns them, keyed by can::Id.
+    ${COMMON}/Parameter/Param.cpp
+    ${COMMON}/Parameter/ParamContainer.cpp
+    ${COMMON}/Parameter/ParamFuelLevel.cpp
+    # ParamStorage packs the whole container into one flatbuffer and LZO-
+    # compresses it -- the parameter blob this product keeps in NVS.
+    ${COMMON}/Parameter/ParamStorage.cpp
+    ${COMMON}/CanAerospace/CanIdDetails.cpp
+    ${COMMON}/Compress/CompressLZO.cpp
+    ${COMMON}/CRC/CRC-32.cpp
+)
+
+# miniLZO is C, not C++, so it is kept out of SRC_COMMON_FILES: those get
+# -include KanardiaCommon.h, which is a C++ header.
+set(SRC_LZO_FILES
+    ${COMMON}/LZO/minilzo.c
 )
 
 # Units: the key/conversion tables plus the UTF-8 formatter, which is what maps
@@ -79,6 +95,11 @@ set(SRC_CAN_FILES
     ${COMMON}/CanAerospace/CanNOD.cpp
     ${COMMON}/CanAerospace/CanOldServices.cpp
     ${COMMON}/CanAerospace/ModuleInfoService.cpp
+    # The receive half of the buffer push: DDS_B takes the bytes, MCS_B's
+    # apply-buffer command commits them. See main/ApplicationDefines.h.
+    ${COMMON}/CanAerospace/DownloadService.cpp
+    ${COMMON}/CanAerospace/ModuleConfigService.cpp
+    ${COMMON}/CRC/CRC-16.cpp
     ${COMMON}/CanAerospace/StaticHelper.cpp
     ${COMMON}/CanAerospace/CanIdUtils.cpp
     ${COMMON}/CanPort/AbstractCanPort.cpp
@@ -97,6 +118,10 @@ set(SRC_OPTION_FILES
     ${COMMON}/Option/Serialize/SerializeUnits.cpp
     ${COMMON}/Option/Serialize/SerializeAzimuth.cpp
     ${COMMON}/Option/Serialize/SerializeAircraft.cpp
+    # Registered by app::Options, not by option::ModelBase: avio::ModelBase
+    # asks us to persist the last known position and this is Common's own slot
+    # for it.
+    ${COMMON}/Option/Serialize/SerializeLastKnownCoordinate.cpp
     ${COMMON}/BLOB/BLOB.cpp
     ${COMMON}/BLOB/BLOBPackUnpack.cpp
     ${COMMON}/Compress/CompressZeros.cpp
@@ -130,13 +155,20 @@ set(SRC_COMMON_FILES
 idf_component_register(
     SRCS "Main.cpp"
          "AppModel.cpp"
+         "AppOptions.cpp"
+         "AppParameters.cpp"
          "CanPortEsp.cpp"
          "CanProcessor.cpp"
+         "StorageOptions.cpp"
          "VectorScene.cpp"
          "ScaleDrawTvg.cpp"
          "SerialConsole.cpp"
          ${SRC_COMMON_FILES}
-    INCLUDE_DIRS "." "${COMMON}" "${COMMON}/ThirdParty" "${PRIVATE_COMMON}")
+         ${SRC_LZO_FILES}
+    INCLUDE_DIRS "." "${COMMON}" "${COMMON}/ThirdParty" "${PRIVATE_COMMON}"
+    # StorageOptions.cpp keeps the option and parameter blobs in the
+    # `settings` NVS partition.
+    PRIV_REQUIRES nvs_flash)
 
 # Common comes from a very different toolchain. Two adjustments:
 #
