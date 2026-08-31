@@ -21,10 +21,12 @@ constexpr const char *TAG = "canproc";
 
 // --------------------------------------------------------------------------
 
-CanProcessor::CanProcessor(can::DirectNOD &nod, can::AbstractCanPort &port)
+CanProcessor::CanProcessor(can::DirectNOD &nod, can::AbstractCanPort &port,
+                           uint32_t uSerial)
     : m_nod(nod)
     , m_port(port)
     , m_services(this)
+    , m_autoId(CAN_NODE_ID, uSerial)
 {
     SetNodeId(CAN_NODE_ID);
     Units().SetOldService(&m_services);
@@ -76,6 +78,13 @@ void CanProcessor::Process(const can::Message &msg)
     else if (eId <= can::Id::LastValidNOD) {
         ProcessNOD(msg);
     }
+    else if (eId == can::Id::APSRequest || eId == can::Id::APSResponse ||
+             eId == can::Id::APSPageCRC) {
+        /* CANHandler::ProcessSpecialAPS(). The firmware-update ids sit above
+         * LastValidNOD, so without this branch they fell into m_uOther. */
+        std::lock_guard<std::mutex> lock(m_mxServices);
+        m_services.HandleAPS(msg);
+    }
     else {
         m_uOther++;
     }
@@ -87,16 +96,173 @@ void CanProcessor::ProcessService(const can::Message &msg)
 {
     m_uService++;
 
-    /* Sign of life is what populates the unit container: every Kanardia module
-     * announces itself, and the container asks the new ones to identify. */
+    /* Sign of life never reaches the old services -- ServiceHandler::Process()
+     * peels it off first, and so do we. */
     if (can::oldservice::GetServiceCode(msg) == can::oldservice::sSignOfLife) {
-        Units().ProcessSignOfLife(msg);
+        ProcessSignOfLife(msg);
         return;
     }
 
     std::lock_guard<std::mutex> lock(m_mxServices);
     m_services.Process(msg);
 }
+
+// --------------------------------------------------------------------------
+
+void CanProcessor::ProcessSignOfLife(const can::Message &msg)
+{
+    /* ServiceHandler::ProcessSignOfLife(), unchanged in shape. The sender's id
+     * and serial are what the negotiation runs on: a unit already using our
+     * candidate id makes Update() ask for an immediate re-announcement, under
+     * the new id it just picked. */
+    const uint8_t uSender = msg.GetSender();
+    if (m_autoId.Update(uSender, msg.GetRegisterB().ui32))
+        PostSignOfLife();
+
+    /* Only once our own id has stopped moving, and never our own frame -- in
+     * self-test the controller hands every transmission straight back, so
+     * without this gate the container would count us as a unit on the bus. */
+    if (m_autoId.ProcessSOLFromSender(uSender))
+        Units().ProcessSignOfLife(msg);
+}
+
+// --------------------------------------------------------------------------
+
+void CanProcessor::PostSignOfLife()
+{
+    /* ServiceHandler::PostSignOfLife(). Assume the state is Test or Fixed. */
+    bool bEmit = true;
+    if (m_autoId.IsFixed() == false) {
+        /* Carries Init -> Test even when no other unit is talking, which is
+         * this board's normal case: in self-test the only frames on the
+         * controller are our own. */
+        bEmit = m_autoId.Update(0, 0);
+    }
+
+    if (bEmit) {
+        const can::Message msg = m_autoId.MakeSOL();
+        /* ServiceHandler hands the id to its sender here; ours is the unit
+         * itself, and Process() uses it to decide what is addressed to us. */
+        SetNodeId(m_autoId.GetId());
+        m_port.Send(msg);
+    }
+}
+
+// --------------------------------------------------------------------------
+
+#if defined(USE_CAN_APS_B)
+
+void CanProcessor::CallBootAppProgrammer(uint32_t uiPageCount, uint32_t byNodeA)
+{
+    /* byNodeA carries the sender in its low byte and the mode flag above it --
+     * APS_B packs it that way for the uC bootloader call. */
+    const unsigned uSender = byNodeA & 0xFF;
+
+    /* A sender that restarts mid-transfer just sends another start. */
+    if (m_hOta != 0) AbortUpdate("restarted by the sender");
+
+    /* Never the slot we are executing from. On a board flashed over USB that
+     * is ota_0, so the first update lands in ota_1 and they alternate. */
+    m_pOtaPart = esp_ota_get_next_update_partition(nullptr);
+    if (m_pOtaPart == nullptr) {
+        ESP_LOGE(TAG, "APS: no OTA slot to write to");
+        return;
+    }
+
+    /* OTA_SIZE_UNKNOWN erases lazily, page by page, instead of erasing four
+     * megabytes up front while the sender waits for us to ask for page 0. */
+    const esp_err_t err = esp_ota_begin(m_pOtaPart, OTA_SIZE_UNKNOWN, &m_hOta);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "APS: esp_ota_begin: %s", esp_err_to_name(err));
+        m_hOta     = 0;
+        m_pOtaPart = nullptr;
+        return;
+    }
+
+    m_uOtaPages = 0;
+    m_uOtaTotal = uiPageCount;
+    ESP_LOGI(TAG, "APS: update from node %u, %u pages of 2 kB -> %s @ 0x%06x",
+             uSender, static_cast<unsigned>(uiPageCount), m_pOtaPart->label,
+             static_cast<unsigned>(m_pOtaPart->address));
+}
+
+// --------------------------------------------------------------------------
+
+void CanProcessor::WriteUpdate(const uint8_t *pData, uint32_t uiSize)
+{
+    if (m_hOta == 0) return;   /* a page after a failed begin, or after an abort */
+
+    const esp_err_t err = esp_ota_write(m_hOta, pData, uiSize);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "APS: esp_ota_write page %u: %s",
+                 static_cast<unsigned>(m_uOtaPages), esp_err_to_name(err));
+        AbortUpdate("write failed");
+        return;
+    }
+
+    /* APS_B has already checked this page's CRC32 -- it does not call us
+     * otherwise -- so every page that arrives here is one the sender and we
+     * agree on. Log sparsely: a 1.2 MB image is close to 600 of them. */
+    m_uOtaPages++;
+    if ((m_uOtaPages % 64) == 0 || m_uOtaPages == m_uOtaTotal) {
+        ESP_LOGI(TAG, "APS: %u/%u pages", static_cast<unsigned>(m_uOtaPages),
+                 static_cast<unsigned>(m_uOtaTotal));
+    }
+}
+
+// --------------------------------------------------------------------------
+
+void CanProcessor::FinishUpdate(bool bOk)
+{
+    if (m_hOta == 0) return;
+
+    if (bOk == false) {
+        AbortUpdate("the sender reported failure");
+        return;
+    }
+
+    /* esp_ota_end() is the real verdict: it validates the image header and
+     * checksum of what actually landed in flash. A transfer whose pages all
+     * passed their CRC can still be a corrupt image. */
+    esp_err_t err = esp_ota_end(m_hOta);
+    m_hOta = 0;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "APS: esp_ota_end: %s", esp_err_to_name(err));
+        m_pOtaPart = nullptr;
+        return;
+    }
+
+    err = esp_ota_set_boot_partition(m_pOtaPart);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "APS: esp_ota_set_boot_partition: %s", esp_err_to_name(err));
+        m_pOtaPart = nullptr;
+        return;
+    }
+
+    /* Deliberately no esp_restart() here. The panel is flying the aircraft as
+     * far as it knows; when the new image starts is the operator's call, and
+     * the next reset is soon enough. */
+    ESP_LOGI(TAG, "APS: update complete, %u pages -> %s; runs at the next reset",
+             static_cast<unsigned>(m_uOtaPages), m_pOtaPart->label);
+    m_pOtaPart = nullptr;
+}
+
+// --------------------------------------------------------------------------
+
+void CanProcessor::AbortUpdate(const char *pReason)
+{
+    if (m_hOta != 0) {
+        esp_ota_abort(m_hOta);
+        m_hOta = 0;
+    }
+    m_pOtaPart = nullptr;
+    ESP_LOGW(TAG, "APS: update abandoned after %u pages -- %s",
+             static_cast<unsigned>(m_uOtaPages), pReason);
+    m_uOtaPages = 0;
+    m_uOtaTotal = 0;
+}
+
+#endif  /* USE_CAN_APS_B */
 
 // --------------------------------------------------------------------------
 

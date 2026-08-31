@@ -93,12 +93,14 @@ set(SRC_NAVIGATION_FILES
 # container and the abstract port the hardware driver implements.
 set(SRC_CAN_FILES
     ${COMMON}/CanAerospace/CanNOD.cpp
+    ${COMMON}/CanAerospace/SOLAutoId.cpp
     ${COMMON}/CanAerospace/CanOldServices.cpp
     ${COMMON}/CanAerospace/ModuleInfoService.cpp
     # The receive half of the buffer push: DDS_B takes the bytes, MCS_B's
     # apply-buffer command commits them. See main/ApplicationDefines.h.
     ${COMMON}/CanAerospace/DownloadService.cpp
     ${COMMON}/CanAerospace/ModuleConfigService.cpp
+    ${COMMON}/CanAerospace/ApplicationProgrammingService.cpp
     ${COMMON}/CRC/CRC-16.cpp
     ${COMMON}/CanAerospace/StaticHelper.cpp
     ${COMMON}/CanAerospace/CanIdUtils.cpp
@@ -168,7 +170,8 @@ idf_component_register(
     INCLUDE_DIRS "." "${COMMON}" "${COMMON}/ThirdParty" "${PRIVATE_COMMON}"
     # StorageOptions.cpp keeps the option and parameter blobs in the
     # `settings` NVS partition.
-    PRIV_REQUIRES nvs_flash)
+    # app_update is the OTA API CanProcessor's APS_B hooks write through.
+    PRIV_REQUIRES nvs_flash pthread app_update)
 
 # Common comes from a very different toolchain. Two adjustments:
 #
@@ -240,7 +243,10 @@ endif()
 # or globally, or point -DLV_FONT_CONV=/path/to/lv_font_conv at an existing one.
 # ---------------------------------------------------------------------------
 
-set(KANARDIA_FONT_TTF "${KANARDIA_BRANCH}/Public/Font/Kanardia.ttf"
+# set(KANARDIA_FONT_TTF "${KANARDIA_BRANCH}/Public/Font/Kanardia.ttf"
+#     CACHE FILEPATH "TTF the LVGL fonts are generated from")
+
+set(KANARDIA_FONT_TTF "${KANARDIA_BRANCH}/Public/Nesis/support/Kanardia.ttf"
     CACHE FILEPATH "TTF the LVGL fonts are generated from")
 
 set(KANARDIA_FONT_SIZES "14;16;20;28"

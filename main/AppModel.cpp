@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_pthread.h"
 #include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
@@ -41,6 +42,12 @@ constexpr uint32_t TICKS_PER_SEC = 1000 / TICK_MS;
  * and SunriseSunset do real floating-point work, so do not go below 8 kB. */
 constexpr uint32_t TASK_STACK  = 8 * 1024;
 constexpr UBaseType_t TASK_PRIO = 4;
+
+/* The CAN receive thread's stack -- see StartModelLoop(). It decodes frames and
+ * never rasterises, so it does not need the 32 kB ThorVG's workers do, and it
+ * cannot have it: 32 kB contiguous internal RAM is not there by the time the
+ * port starts. */
+constexpr uint32_t CAN_STACK = 12 * 1024;
 
 Model         *g_pModel = nullptr;
 TaskHandle_t   g_hTask  = nullptr;
@@ -135,7 +142,8 @@ void Model::Simulate(float fSeconds)
 {
     /* Only in self-test, where the frames come back to us and reach no further.
      * On a real bus these ids belong to somebody else. */
-    if (g_pPort == nullptr || g_pPort->GetMode() != CanPortEsp::Mode::SelfTest)
+    if (g_pPort == nullptr || g_pProc == nullptr ||
+        g_pPort->GetMode() != CanPortEsp::Mode::SelfTest)
         return;
 
     /* Stand in for the engine ECU: idle, then a slow sweep up through the green
@@ -202,7 +210,7 @@ bool Model::SimulateParameterPush()
 
     /* At ourselves: in self-test the controller hands every frame back, so the
      * whole handshake runs -- offer, accept, data, checksum, commit. */
-    return g_pProc->PushBuffer(CAN_NODE_ID,
+    return g_pProc->PushBuffer(g_pProc->GetNodeId(),
                                can::oldservice::BufferDownloadCommand::Parameter, vFB);
 }
 
@@ -210,23 +218,22 @@ bool Model::SimulateParameterPush()
 
 void Model::SendSignOfLife()
 {
-    if (g_pPort == nullptr || g_pPort->GetMode() != CanPortEsp::Mode::SelfTest)
+    if (g_pProc == nullptr)
         return;
 
-    namespace os = can::oldservice;
-
-    /* Same shape SOLAutoId::MakeSOL() builds: a service request whose service
-     * code is sSignOfLife, hardware type in the message-code byte, serial in
-     * register B. */
-    const can::Identifier id(can::lPrimary, can::Id::ServiceRequest,
-                             CAN_NODE_ID, can::EVERYBODY);
-    const can::Message msg(
-        id,
-        can::Register(uint8_t(0), uint8_t(os::dtULong),
-                      uint8_t(os::sSignOfLife), uint8_t(CAN_NODE_ID)),
-        can::Register(uint32_t(DEMO_SERIAL)));
-
-    g_pPort->Send(msg);
+    /* Every mode, unlike Simulate() and SimulateParameterPush(). Those put
+     * frames on the bus under ids that belong to real sensors and to whoever
+     * is being configured, so they stay inside self-test; a sign of life is
+     * ours to send, and announcing ourselves is what a module on a real bus is
+     * supposed to do. SOLAutoId is what makes that safe -- the id it settles
+     * on is negotiated against the units already talking.
+     *
+     * The frame and the id behind it are CanProcessor's, through SOLAutoId --
+     * see CanProcessor::PostSignOfLife(). Building the message here meant a
+     * second copy of a layout Common already owns, and it did not match: the
+     * data-type byte was dtULong where ServiceHandler sends a zero. */
+    g_pProc->PostSignOfLife();
+    ESP_LOGI(TAG, "sign-of-life sent, id=%u", static_cast<unsigned>(g_pProc->GetNodeId()));
 }
 
 // --------------------------------------------------------------------------
@@ -310,10 +317,34 @@ bool StartModelLoop()
         [](const can::Message &msg) { if (g_pProc) g_pProc->Process(msg); }, cfg);
     g_pPort = &port;
 
-    static CanProcessor proc(model.GetNODStore(), port);
+    static CanProcessor proc(model.GetNODStore(), port, Model::DEMO_SERIAL);
     g_pProc = &proc;
 
-    if (port.Start() == false) {
+    /* The receive thread gets its own, smaller stack.
+     *
+     * AbstractCanPort::StartLoopProcess() opens a std::jthread, so its stack
+     * comes from CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT -- 32 kB, which is
+     * sized for ThorVG's worker pool and its 16 kB on-stack Cell buffer. This
+     * thread only decodes frames, and asking for 32 kB of *contiguous*
+     * internal RAM here is what finally broke: after boot the largest free
+     * block is 31744 B, so pthread_create failed and std::thread called
+     * abort(). CAN_STACK is what the loop actually needs, with room to spare.
+     *
+     * esp_pthread_set_cfg() is per-calling-task and not inherited, so this
+     * only reaches the thread Start() opens below -- ThorVG's workers are
+     * created from the LVGL task and keep the 32 kB default. */
+    esp_pthread_cfg_t pthreadCfgPrev = esp_pthread_get_default_config();
+    esp_pthread_cfg_t pthreadCfg     = pthreadCfgPrev;
+    pthreadCfg.stack_size  = CAN_STACK;
+    pthreadCfg.thread_name = "can_rx";
+    pthreadCfg.inherit_cfg = false;
+    ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadCfg));
+
+    const bool bPortUp = port.Start();
+
+    ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadCfgPrev));
+
+    if (bPortUp == false) {
         ESP_LOGE(TAG, "CAN port failed to start; the NOD will stay empty");
     }
 

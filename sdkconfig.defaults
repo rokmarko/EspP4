@@ -4,11 +4,20 @@
 
 # --- Target / silicon ---------------------------------------------------------
 CONFIG_IDF_TARGET="esp32p4"
-# ESP-IDF 5.5.1 only knows ESP32-P4 revisions up to v1.0 and PSRAM up to 200 MHz.
-# Waveshare's own examples pin rev 3.x and 250 MHz, which needs IDF >= 5.5.5 --
-# those symbols do not exist here and would be silently ignored. The minimum
-# revision is therefore left at the IDF default (v0.1), which boots on any board.
-# 200 MHz PSRAM is gated behind the experimental-features flag.
+# The silicon on this board reports revision v1.3. From IDF 5.5.5 the P4 support
+# splits in two -- "rev <3.0" and "rev >=3.0" are mutually exclusive, because the
+# hardware differs too much to share one image -- and the default is the >=3.0
+# half, minimum v3.1. Building that and flashing it fails at esptool:
+#
+#   bootloader.bin requires chip revision in range [v3.1 - v3.99]
+#   (this chip is revision v1.3)
+#
+# So take the <3.0 half explicitly and ask for the lowest minimum in it, which
+# boots on any 0.x or 1.x part. Do not copy Waveshare's rev 3.x pins.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_1=y
+# 200 MHz PSRAM is gated behind the experimental-features flag; 250 MHz needs
+# rev 3.x silicon and is not reachable from this half.
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 
 # --- Flash / partitions -------------------------------------------------------
@@ -16,6 +25,11 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# The table goes at 0x10000, not IDF's default 0x8000: the second-stage
+# bootloader loads at 0x2000, and IDF v5.5.5 builds a 0x6120-byte bootloader
+# for the P4 -- 288 bytes past what the default offset leaves it. This gives it
+# 0xE000. partitions.csv carries the matching offsets and the erase-once note.
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
 
 # --- NVS ----------------------------------------------------------------------
 # Put NVS's page cache and key hash list in PSRAM. Those are the allocations
@@ -59,7 +73,12 @@ CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
 CONFIG_LV_DEF_REFR_PERIOD=15
-CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+# One draw unit, not two. A second one is a ThorVG std::thread worker, and each
+# worker holds CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT -- 32 kB of internal RAM,
+# for the 16 kB Cell buffer rleRender() puts on the stack. Internal RAM is what
+# this board runs out of first, and APS_B's 2 kB-page buffer is 8 kB of .bss on
+# top of that. Dropping the pool is the trade CLAUDE.md already names.
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
 # Recommended by LVGL whenever ThorVG or FreeType renders on the draw threads.
 CONFIG_LV_DRAW_THREAD_STACK_SIZE=32768
 CONFIG_LV_USE_PERF_MONITOR=y

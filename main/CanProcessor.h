@@ -30,6 +30,9 @@
 #include "CanPort/AbstractCanPort.h"
 
 #include "Application/uCUnitInfoContainer.h"
+#include "CanAerospace/SOLAutoId.h"
+
+#include "esp_ota_ops.h"
 
 #include <atomic>
 #include <cstdint>
@@ -41,10 +44,24 @@ namespace app {
 class CanProcessor : public can::oldservice::AbstractUnit
 {
 public:
-    CanProcessor(can::DirectNOD &nod, can::AbstractCanPort &port);
+    CanProcessor(can::DirectNOD &nod, can::AbstractCanPort &port, uint32_t uSerial);
 
     /** Called on the port's receive thread, once per accepted frame. */
     void Process(const can::Message &msg);
+
+    /**
+     * Announce ourselves, and let the auto id advance.
+     *
+     * ServiceHandler::PostSignOfLife(), which is the shape every Kanardia
+     * product sends: nudge the state machine when the id is not fixed yet --
+     * that is what carries it out of Init on a bus with no other traffic --
+     * and emit the frame SOLAutoId builds. GetNodeId() follows the id the
+     * state machine settles on, the way ServiceHandler calls SetSelfId().
+     */
+    void PostSignOfLife();
+
+    /** True once the auto id has stopped moving. */
+    bool IsIdFixed() const { return m_autoId.IsFixed(); }
 
     /** Once per second: age the unit table and let the services time out. */
     void Update1s();
@@ -64,6 +81,24 @@ public:
 #if defined(USE_CAN_MCS_B)
     /** Configuration commands. Only MCS_APPLY_BUFFER_DATA does anything here. */
     int32_t ConfigureModule(const can::Message &msg) override;
+#endif
+#if defined(USE_CAN_APS_B)
+    /* --- Firmware update over CAN -------------------------------------
+     *
+     * The three calls APS_B makes on its way through a transfer, mapped onto
+     * ESP-IDF's OTA API. Named for the uC world APS came from: there,
+     * "call the boot app programmer" jumps into the bootloader. Here it opens
+     * a write to whichever app slot is not running.
+     *
+     * All three run on the port's receive thread, where HandleAPS() is
+     * reached from Process(). */
+
+    /** Begin a transfer of uiPageCount 2 kB pages from node byNodeA. */
+    void CallBootAppProgrammer(uint32_t uiPageCount, uint32_t byNodeA) override;
+    /** One verified 2 kB page, in order, straight into the inactive slot. */
+    void WriteUpdate(const uint8_t *pData, uint32_t uiSize) override;
+    /** Close the transfer; on success the slot becomes the boot partition. */
+    void FinishUpdate(bool bOk) override;
 #endif
 #if defined(USE_CAN_DDS_A)
     /** Serve one 4-byte word of the buffer we are pushing. Index is 1-based. */
@@ -145,11 +180,34 @@ public:
 
 private:
     void ProcessService(const can::Message &msg);
+    void ProcessSignOfLife(const can::Message &msg);
     void ProcessNOD(const can::Message &msg);
+#if defined(USE_CAN_APS_B)
+    /** Give up on a transfer in progress and release the OTA handle. */
+    void AbortUpdate(const char *pReason);
+#endif
 
     can::DirectNOD           &m_nod;
     can::AbstractCanPort     &m_port;
     can::oldservice::OldServices m_services;
+
+    /* The id negotiation, and the sign-of-life frame that carries it. It is
+     * ServiceHandler's member and belongs with the unit rather than the model:
+     * settling on an id means calling SetNodeId(), and it is this object that
+     * decides which frames are ours. Locking is SOLAutoId's own -- both halves
+     * run on the port's receive thread, PostSignOfLife() also on the model
+     * task once a second. */
+    can::SOLAutoId m_autoId;
+
+#if defined(USE_CAN_APS_B)
+    /* The OTA write in progress, or a closed handle and a null partition when
+     * no transfer is running. APS_B holds the page buffer and the retry count;
+     * all this side keeps is where the bytes go. */
+    esp_ota_handle_t       m_hOta      = 0;
+    const esp_partition_t *m_pOtaPart  = nullptr;
+    uint32_t               m_uOtaPages = 0;   /* pages written so far */
+    uint32_t               m_uOtaTotal = 0;   /* pages the sender announced */
+#endif
 
     /* OldServices is a plain state machine with no locking of its own, and it
      * is reached from two threads here: Process() runs on the port's receive

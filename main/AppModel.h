@@ -100,8 +100,11 @@ public:
      *
      * This is what populates the unit container: a sign-of-life carries the
      * sender's node id, hardware type and serial, and the container asks any
-     * unit it has not seen before to identify itself properly. Self-test only,
-     * for the same reason Simulate() is.
+     * unit it has not seen before to identify itself properly.
+     *
+     * Sent in every mode, unlike Simulate(): the id it goes out under is the
+     * one SOLAutoId negotiated against whoever else is on the bus, so there is
+     * nothing to collide with.
      */
     void SendSignOfLife();
 
@@ -134,12 +137,19 @@ protected:
 public:
     StampedExtNavStatus GetExternalNavigationStatus() const override { return {}; }
 
+public:
+    /**
+     * Serial reported in our sign-of-life. No real unit carries this one.
+     *
+     * Public because SOLAutoId needs it, and SOLAutoId lives in CanProcessor:
+     * a collision on the auto id is settled by comparing serials, so the
+     * number has to reach the state machine that does the comparing.
+     */
+    static constexpr uint32_t DEMO_SERIAL = 0xE5B04;
+
 private:
     /** 180 km/h, a plausible default for the kind of aircraft this ends up in. */
     static constexpr float CRUISE_MPS = 50.0f;
-
-    /** Serial reported in our sign-of-life. No real unit carries this one. */
-    static constexpr uint32_t DEMO_SERIAL = 0xE5B04;
 
     Options    m_options;
     /* Constructed from m_nodOwned, which NodOwner has already built: bases

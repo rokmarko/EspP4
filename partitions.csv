@@ -33,18 +33,28 @@
 # option blobs use 17. Do not enlarge it without re-reading app_main's
 # "largest block" line afterwards.
 #
-# That leaves a 32 kB hole before ota_0, which has to start on a 64 kB
-# boundary. Flash is the resource this project has to spare.
+# The table itself sits at 0x10000, not IDF's default 0x8000. The second-stage
+# bootloader loads at 0x2000, so the default leaves it 0x6000 bytes -- and
+# IDF v5.5.5 builds a 0x6120-byte bootloader for the P4, which fails the build
+# with "Bootloader binary size ... too large for partition table offset".
+# At 0x10000 the bootloader may grow to 0xE000. Moving the table is what makes
+# the offsets below start at 0x11000; the data partitions then fill the
+# 0x11000..0x20000 gap exactly, because ota_0 has to start on a 64 kB boundary.
+#
+# Changing this offset invalidates everything already in flash: the old nvs and
+# settings partitions are at addresses nothing reads any more. Erase once
+# (`idf.py -p /dev/ttyACM0 erase-flash`) before the first flash; `Settings`
+# repopulates the option blobs on the next boot.
 #
 # Offsets are spelled out because a mistake here bricks the board quietly.
 # gen_esp32part.py rejects a trailing comment on a partition line, hence the
 # table above.
 #
 # Name,     Type, SubType,  Offset,    Size,      Flags
-nvs,        data, nvs,      0x9000,    0x6000,
-phy_init,   data, phy,      0xf000,    0x1000,
-otadata,    data, ota,      0x10000,   0x2000,
-settings,   data, nvs,      0x12000,   0x6000,
+nvs,        data, nvs,      0x11000,   0x6000,
+phy_init,   data, phy,      0x17000,   0x1000,
+otadata,    data, ota,      0x18000,   0x2000,
+settings,   data, nvs,      0x1a000,   0x6000,
 ota_0,      app,  ota_0,    0x20000,   0x400000,
 ota_1,      app,  ota_1,    0x420000,  0x400000,
 storage,    data, spiffs,   0x820000,  0x7e0000,

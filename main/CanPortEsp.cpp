@@ -95,7 +95,7 @@ bool CanPortEsp::Start()
     twai_general_config_t general =
         TWAI_GENERAL_CONFIG_DEFAULT(m_cfg.eTx, m_cfg.eRx, ToTwaiMode(m_cfg.eMode));
     /* CANaerospace traffic is bursty; a deeper RX queue costs little. */
-    general.rx_queue_len = 32;
+    general.rx_queue_len = 64;
     general.tx_queue_len = 16;
 
     /* Accept everything: filtering is the processor's job, by id range. */

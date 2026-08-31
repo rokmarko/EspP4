@@ -44,3 +44,19 @@
  * sends the MCS_APPLY_BUFFER_DATA that commits a pushed buffer. */
 #define USE_CAN_MCS_A
 #define USE_CAN_MCS_B
+
+/*
+ * Application programming service, node B: accept a firmware update pushed
+ * over CAN, the way every Kanardia unit is updated in the field.
+ *
+ * APS_B_NO_BOOTLOADER picks the variant that does not hand the transfer to a
+ * uC bootloader -- there is none here. It buffers a 2 kB page in RAM, asks the
+ * sender for the next one, checks the page CRC32 and calls the product back
+ * with WriteUpdate() / FinishUpdate(). Those land on ESP-IDF's OTA API and the
+ * ota_0 / ota_1 slots partitions.csv carries.
+ *
+ * The buffer is a member, so it is 8 kB of .bss; CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
+ * is what makes room for it -- see sdkconfig.defaults.
+ */
+#define USE_CAN_APS_B
+#define APS_B_NO_BOOTLOADER
