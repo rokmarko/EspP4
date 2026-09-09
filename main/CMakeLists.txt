@@ -96,8 +96,6 @@ set(SRC_CAN_FILES
     ${COMMON}/CanAerospace/SOLAutoId.cpp
     ${COMMON}/CanAerospace/CanOldServices.cpp
     ${COMMON}/CanAerospace/ModuleInfoService.cpp
-    # The receive half of the buffer push: DDS_B takes the bytes, MCS_B's
-    # apply-buffer command commits them. See main/ApplicationDefines.h.
     ${COMMON}/CanAerospace/DownloadService.cpp
     ${COMMON}/CanAerospace/ModuleConfigService.cpp
     ${COMMON}/CanAerospace/ApplicationProgrammingService.cpp

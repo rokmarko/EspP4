@@ -42,7 +42,6 @@ public:
     struct Config {
         gpio_num_t eTx           = GPIO_NUM_30;
         gpio_num_t eRx           = GPIO_NUM_31;
-        /** The Kanardia bus runs at 500 kbit/s -- see SocketCan.cpp. */
         uint32_t   uBitrateKbps  = 500;
         Mode       eMode         = Mode::Normal;
     };
