@@ -31,6 +31,15 @@ python3 .claude/skills/run-espp4/driver.py smoke
 python3 .claude/skills/run-espp4/driver.py shot --scene gauge --out gauge.png
 ```
 
+Formatting and new source files go through the kanardia-style skill, which
+needs `clang-format-20` (`sudo apt install clang-format-20`):
+
+```bash
+python3 .claude/skills/kanardia-style/style.py check    # non-zero if anything is off
+python3 .claude/skills/kanardia-style/style.py format
+python3 .claude/skills/kanardia-style/style.py new Foo  # banded Foo.h + Foo.cpp
+```
+
 ```bash
 idf.py set-target esp32p4        # first time only; also re-resolves components
 idf.py build
@@ -439,9 +448,46 @@ full reasoning; the short version:
 
 ## Code style
 
-Our own code: `m_` Hungarian members (`m_fPhase`, `m_eMode`, `m_canvas`) and
-PascalCase methods (`Build()`, `DrawGauge()`, `CreateScene()`). Calls into LVGL
-and `lvgl_cpp` keep those libraries' snake_case names.
+Everything in this section is enforced by the **kanardia-style skill**, which
+is how you should apply it -- `.claude/skills/kanardia-style/style.py check`
+reports, `format` fixes, `new Foo` scaffolds a banded `Foo.h`/`Foo.cpp` pair.
+It reads `SKILL.md` for the reasoning; the short version:
+
+**Naming.** Our own code: `m_` Hungarian members (`m_fPhase`, `m_eMode`,
+`m_canvas`) and PascalCase methods (`Build()`, `DrawGauge()`, `CreateScene()`).
+Calls into LVGL and `lvgl_cpp` keep those libraries' snake_case names. This is
+the one rule the script cannot check for you.
+
+**Every `main/*.h` and `main/*.cpp` opens with the Kanardia copyright banner**,
+then -- in a header -- `#pragma once`. Never an `#ifndef` include guard. An
+`#ifndef` around a *valued* `#define` is a configuration default rather than a
+guard and stays put, which is what `CAN_NODE_ID` in `ApplicationDefines.h` is.
+
+**Comments are plain prose in `//` lines, with no doxygen at all** -- no `/**`,
+`///`, `///<`, `@file`, `@brief`, `@param`, `@return`, `@p`. A multi-paragraph
+file header is a run of `//` lines with a bare `//` between paragraphs. Apart
+from the banner, `/* */` survives in exactly one place in the project: the
+mid-expression comment in `AppModel.cpp`'s constructor initialiser list, where
+`//` would swallow the rest of the line.
+
+**Layout is `clang-format-20` against the repo's own `.clang-format`** -- tabs,
+`IndentWidth: 3`, Allman braces for definitions and K&R for control flow,
+`SpaceBeforeParens: Never`, `PointerAlignment: Left`, `ColumnLimit: 120`,
+`SortIncludes: false` (the include order is organised by hand). Install it once
+with `sudo apt install clang-format-20`.
+
+Two traps, both handled by the skill's script and both worth knowing if you
+ever run `clang-format-20 -i` yourself: it needs **three or four passes to
+converge**, because trailing-comment positions settle late; and converting a
+space-indented file to 3-column tabs it leaves **one stray space per tab in
+front of every comment line**, which puts the comment a column off from the
+code it describes and which it then treats as a fixed point. Leading tabs
+followed by *more* spaces than tabs are genuine continuation-line alignment and
+must be left alone.
+
+None of this applies outside `main/`. `managed_components/` and the shared
+`Public/Common` tree are third-party as far as this repo is concerned, carry
+their own style, and are never reformatted.
 
 ## Known board quirks
 

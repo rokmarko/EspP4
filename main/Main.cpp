@@ -1,11 +1,20 @@
-/**
- * @file Main.cpp
- * @brief LVGL 9 + ThorVG demo for the Waveshare ESP32-P4-WIFI6-Touch-LCD-4C.
- *
- * The board is a 4", 720x720 round IPS panel on 2-lane MIPI-DSI (JD9365) with a
- * GT911 capacitive touch controller. All of that is handled by the Waveshare
- * BSP component; this file only starts it and hands over to the scene.
- */
+/***************************************************************************
+ *                                                                         *
+ *   Copyright (C) 2019 by Kanardia d.o.o. [see www.kanardia.eu]           *
+ *   Writen by:                                                            *
+ *      Rok Markovic [rok.markovic@kanardia.eu]                            *
+ *                                                                         *
+ *   Status: Open Source                                                   *
+ *                                                                         *
+ *   License: GPL - GNU General Public License                             *
+ *                                                                         *
+ ***************************************************************************/
+
+// LVGL 9 + ThorVG demo for the Waveshare ESP32-P4-WIFI6-Touch-LCD-4C.
+//
+// The board is a 4", 720x720 round IPS panel on 2-lane MIPI-DSI (JD9365) with a
+// GT911 capacitive touch controller. All of that is handled by the Waveshare
+// BSP component; this file only starts it and hands over to the scene.
 
 #include "KanardiaCommon.h"
 
@@ -23,84 +32,84 @@
 #include "Unit/UnitFormatterUtf8.h"
 
 namespace {
-constexpr const char *TAG = "main";
+constexpr const char* TAG = "main";
 
-/**
- * Hand Common's formatting layer the formatter it works through.
- *
- * `avio::format` keeps one process-wide `unit::Formatter*` and asserts on it;
- * everything below -- ToString(), ToStringFromSystemUnit(), Formatter::
- * FormatAzimuth() -- reaches it from there, so no call site has to carry one.
- * The UTF-8 formatter is the one that maps a unit onto the private-use
- * codepoint the Kanardia font draws for it.
- */
+// Hand Common's formatting layer the formatter it works through.
+//
+// `avio::format` keeps one process-wide `unit::Formatter*` and asserts on it;
+// everything below -- ToString(), ToStringFromSystemUnit(), Formatter::
+// FormatAzimuth() -- reaches it from there, so no call site has to carry one.
+// The UTF-8 formatter is the one that maps a unit onto the private-use
+// codepoint the Kanardia font draws for it.
 void InstallUnitFormatter()
 {
-    static const unit::FormatterUtf8 formatter;
-    avio::format::SetUnitFormatter(&formatter);
+	static const unit::FormatterUtf8 formatter;
+	avio::format::SetUnitFormatter(&formatter);
 }
 } // namespace
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "panel %dx%d, %d-lane MIPI-DSI",
-             BSP_LCD_H_RES, BSP_LCD_V_RES, BSP_LCD_MIPI_DSI_LANE_NUM);
+	ESP_LOGI(TAG, "panel %dx%d, %d-lane MIPI-DSI", BSP_LCD_H_RES, BSP_LCD_V_RES, BSP_LCD_MIPI_DSI_LANE_NUM);
 
-    /* Zero-initialised, then filled in explicitly: ESP_LV_ADAPTER_DEFAULT_CONFIG()
-     * leaves the nested auto_sleep.callbacks member out and trips
-     * -Wmissing-field-initializers in C++. Everything left at zero (auto sleep
-     * off, stack in internal RAM, no touch axis flips) matches its defaults. */
-    bsp_display_cfg_t cfg = {};
-    /* ThorVG rasterises from the LVGL task; the adapter's 8 kB default is tight. */
-    cfg.lv_adapter_cfg.task_stack_size   = 32 * 1024;
-    cfg.lv_adapter_cfg.task_priority     = ESP_LV_ADAPTER_DEFAULT_TASK_PRIORITY;
-    cfg.lv_adapter_cfg.task_core_id      = ESP_LV_ADAPTER_DEFAULT_TASK_CORE_ID;
-    cfg.lv_adapter_cfg.tick_period_ms    = ESP_LV_ADAPTER_DEFAULT_TICK_PERIOD_MS;
-    cfg.lv_adapter_cfg.task_min_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MIN_DELAY_MS;
-    cfg.lv_adapter_cfg.task_max_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MAX_DELAY_MS;
-    cfg.rotation        = ESP_LV_ADAPTER_ROTATE_0;
-    cfg.tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL;
+	// Zero-initialised, then filled in explicitly: ESP_LV_ADAPTER_DEFAULT_CONFIG()
+	// leaves the nested auto_sleep.callbacks member out and trips
+	// -Wmissing-field-initializers in C++. Everything left at zero (auto sleep
+	// off, stack in internal RAM, no touch axis flips) matches its defaults.
+	bsp_display_cfg_t cfg = {};
+	// ThorVG rasterises from the LVGL task; the adapter's 8 kB default is tight.
+	cfg.lv_adapter_cfg.task_stack_size	 = 32 * 1024;
+	cfg.lv_adapter_cfg.task_priority		 = ESP_LV_ADAPTER_DEFAULT_TASK_PRIORITY;
+	cfg.lv_adapter_cfg.task_core_id		 = ESP_LV_ADAPTER_DEFAULT_TASK_CORE_ID;
+	cfg.lv_adapter_cfg.tick_period_ms	 = ESP_LV_ADAPTER_DEFAULT_TICK_PERIOD_MS;
+	cfg.lv_adapter_cfg.task_min_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MIN_DELAY_MS;
+	cfg.lv_adapter_cfg.task_max_delay_ms = ESP_LV_ADAPTER_DEFAULT_TASK_MAX_DELAY_MS;
+	cfg.rotation								 = ESP_LV_ADAPTER_ROTATE_0;
+	cfg.tear_avoid_mode						 = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL;
 
-    if (bsp_display_start_with_config(&cfg) == nullptr) {
-        ESP_LOGE(TAG, "display init failed");
-        return;
-    }
+	if(bsp_display_start_with_config(&cfg) == nullptr) {
+		ESP_LOGE(TAG, "display init failed");
+		return;
+	}
 
-    /* Before anything formats a value -- the scene builds its labels below. */
-    InstallUnitFormatter();
+	// Before anything formats a value -- the scene builds its labels below.
+	InstallUnitFormatter();
 
-    /* Console first, then the model, then the scene.
-     *
-     * The console and the CAN thread each want a 32 kB *contiguous* stack out
-     * of internal RAM, and the model loop mounts the NVS settings partition on
-     * its way past -- so the big stacks are taken while the heap is still
-     * clean. The console failing is especially bad, since it is the only way
-     * to see anything from the host.
-     *
-     * The scene comes last because it reads its colour bands out of the
-     * parameter container, and that is only populated -- from its defaults and
-     * then from the stored blob -- once the model loop has run. */
-    demo::StartSerialConsole();
+	// Console first, then the model, then the scene.
+	//
+	// The console and the CAN thread each want a 32 kB *contiguous* stack out
+	// of internal RAM, and the model loop mounts the NVS settings partition on
+	// its way past -- so the big stacks are taken while the heap is still
+	// clean. The console failing is especially bad, since it is the only way
+	// to see anything from the host.
+	//
+	// The scene comes last because it reads its colour bands out of the
+	// parameter container, and that is only populated -- from its defaults and
+	// then from the stored blob -- once the model loop has run.
+	demo::StartSerialConsole();
 
-    if (!app::StartModelLoop()) {
-        ESP_LOGE(TAG, "model loop failed to start");
-    }
+	if(!app::StartModelLoop()) {
+		ESP_LOGE(TAG, "model loop failed to start");
+	}
 
-    bsp_display_lock(UINT32_MAX);
-    const bool ok = demo::CreateScene();
-    bsp_display_unlock();
+	bsp_display_lock(UINT32_MAX);
+	const bool ok = demo::CreateScene();
+	bsp_display_unlock();
 
-    if (!ok) {
-        ESP_LOGE(TAG, "scene init failed");
-        return;
-    }
+	if(!ok) {
+		ESP_LOGE(TAG, "scene init failed");
+		return;
+	}
 
-    bsp_display_backlight_on();
+	bsp_display_backlight_on();
 
-    /* Largest block, not just the total: the 32 kB stacks above need it
-     * contiguous, and that is what runs out first. */
-    ESP_LOGI(TAG, "free heap: %u B internal (largest block %u B), %u B PSRAM",
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+	// Largest block, not just the total: the 32 kB stacks above need it
+	// contiguous, and that is what runs out first.
+	ESP_LOGI(
+		TAG,
+		"free heap: %u B internal (largest block %u B), %u B PSRAM",
+		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+		static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM))
+	);
 }

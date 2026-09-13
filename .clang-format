@@ -1,0 +1,133 @@
+---
+# Kanardia NESIS — clang-format configuration
+# Matches the observed code style: tabs, Allman braces for definitions,
+# K&R braces for control flow, no space before parentheses.
+#
+# Install:  sudo apt install clang-format-20
+# Run:      python3 .claude/skills/kanardia-style/style.py format
+#           (that wraps clang-format-20 -i, loops it to convergence and fixes
+#            the stray space it leaves in front of comment lines)
+
+Language: Cpp
+Standard: Latest
+BasedOnStyle: LLVM
+
+# ---------------------------------------------------------------------------
+# Indentation
+# ---------------------------------------------------------------------------
+IndentWidth:                        3
+TabWidth:                           3
+UseTab:                             Always
+ContinuationIndentWidth:            3
+ConstructorInitializerIndentWidth:  3
+# Pull access-modifier labels one level back so they align with the class body
+AccessModifierOffset:               -3
+NamespaceIndentation:               Inner
+
+# ---------------------------------------------------------------------------
+# Brace style — Allman for definitions, K&R for control flow
+# ---------------------------------------------------------------------------
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass:            true
+  AfterControlStatement: false
+  AfterEnum:             true
+  AfterFunction:         true
+  AfterNamespace:        false
+  AfterStruct:           true
+  AfterUnion:            true
+  AfterCaseLabel:        false
+  BeforeCatch:           false
+  BeforeElse:            true
+  IndentBraces:          false
+  SplitEmptyFunction:    false
+  SplitEmptyRecord:      false
+  SplitEmptyNamespace:   false
+
+# ---------------------------------------------------------------------------
+# Column limit
+# ---------------------------------------------------------------------------
+ColumnLimit: 120
+
+# ---------------------------------------------------------------------------
+# Pointer and reference alignment — attached to type (left)
+# ---------------------------------------------------------------------------
+PointerAlignment:   Left
+ReferenceAlignment: Left
+
+# ---------------------------------------------------------------------------
+# Bracket alignment — BlockIndent: args on next line +1 indent, closing
+# bracket back at statement level (matches the observed constructor style)
+# ---------------------------------------------------------------------------
+AlignAfterOpenBracket: BlockIndent
+BinPackArguments:      false
+BinPackParameters:     false
+
+# ---------------------------------------------------------------------------
+# Spacing
+# ---------------------------------------------------------------------------
+# No space between keyword and opening paren: if(x), for(...)
+SpaceBeforeParens:            Never
+SpaceAfterCStyleCast:         false
+SpacesInParentheses:          false
+SpacesInSquareBrackets:       false
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceBeforeCpp11BracedList:   false
+
+# ---------------------------------------------------------------------------
+# Constructor initializer list — each entry on its own line, comma before
+# ---------------------------------------------------------------------------
+BreakConstructorInitializers:  AfterColon
+PackConstructorInitializers:   Never
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+AlwaysBreakTemplateDeclarations: Yes
+
+# ---------------------------------------------------------------------------
+# Binary operators
+# ---------------------------------------------------------------------------
+BreakBeforeBinaryOperators: NonAssignment
+
+# ---------------------------------------------------------------------------
+# Includes — preserve the existing developer-organised order
+# ---------------------------------------------------------------------------
+SortIncludes: false
+
+# ---------------------------------------------------------------------------
+# Trailing comments — leave as written
+# ---------------------------------------------------------------------------
+AlignTrailingComments:
+  Kind:           Leave
+
+# ---------------------------------------------------------------------------
+# Alignment — do not auto-align; avoids fighting manual column alignment
+# ---------------------------------------------------------------------------
+AlignConsecutiveAssignments:   true
+AlignConsecutiveDeclarations:  true
+AlignConsecutiveMacros:        true
+AlignArrayOfStructures:        Right
+AlignConsecutiveShortCaseStatements:
+  Enabled:          true
+  AcrossEmptyLines: false
+  AcrossComments:   false
+  AlignCaseColons:  false
+  
+StatementAttributeLikeMacros: [emit]
+
+# ---------------------------------------------------------------------------
+# Short forms
+# ---------------------------------------------------------------------------
+AllowShortFunctionsOnASingleLine:  Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine:      false
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortBlocksOnASingleLine:     true
+AllowShortNamespacesOnASingleLine: true
+
+# ---------------------------------------------------------------------------
+# Miscellaneous
+# ---------------------------------------------------------------------------
+CompactNamespaces:   true
+FixNamespaceComments: true
