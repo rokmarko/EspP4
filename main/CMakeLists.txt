@@ -161,7 +161,8 @@ idf_component_register(
          "CanProcessor.cpp"
          "StorageOptions.cpp"
          "VectorScene.cpp"
-         "ScaleDrawTvg.cpp"
+         "PainterTvg.cpp"
+         "ScaleDraw.cpp"
          "SerialConsole.cpp"
          ${SRC_COMMON_FILES}
          ${SRC_LZO_FILES}

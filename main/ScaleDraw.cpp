@@ -1,107 +1,30 @@
 /**
- * @file ScaleDrawTvg.cpp
- * @brief ThorVG implementation of Common/Scale/ScaleDrawQt.cpp.
+ * @file ScaleDraw.cpp
+ * @brief Bodies of the scale drawing declared in ScaleDraw.h.
  *
- * The structure deliberately mirrors the Qt original, function for function,
- * so the two stay easy to diff. Three things differ, and all three come from
- * the back end rather than from the scale itself:
+ * Every function here is a template over the back end -- `PainterLike auto &P`
+ * -- so the bodies would normally have to sit in the header. They do not,
+ * because the set of back ends is closed and known: the explicit
+ * instantiations at the foot of this file name them, and everything the two
+ * entry points call is instantiated along with them. That keeps ThorVG (and Qt)
+ * out of every translation unit that merely wants to draw a scale.
  *
- *  - Strokes that share a pen are collected into one path and stroked once.
- *    ThorVG costs ~100 ms per frame on this board; paths are the currency.
- *  - Bands are arcs appended to a path and stroked, not QPainter::drawArc.
- *  - Labels go through lv_draw_label. ThorVG in LVGL exposes no text API, so
- *    "draw the glyphs as a path" is not available.
+ * Adding a back end means adding one pair of instantiations below, and nothing
+ * else.
  */
 
-#include "ScaleDrawTvg.h"
+#include "ScaleDraw.h"
 
-#include "Parameter/ParamBands.h"
-
-#include "KanardiaFont.h"
-
-#include "esp_log.h"
+#include "PainterTvg.h"
+#include "PainterQt.h"
 
 #include <cmath>
 #include <cstdio>
 
 namespace scale {
-namespace tvg {
-
-namespace {
-
-constexpr const char *TAG = "scale";
-
-/** Arc2D angles are counter-clockwise; LVGL's vector API is clockwise. */
-constexpr float ToLvglDeg(float fArc2DDeg) { return -fArc2DDeg; }
-
-} // namespace
-
-// --------------------------------------------------------------------
-//  Painter
-// --------------------------------------------------------------------
-
-void Painter::SetPen(::gui::ARGB argb, float fWidth)
-{
-    m_penColor = argb;
-
-    m_dsc.set_fill_opa(LV_OPA_TRANSP);
-    m_dsc.set_stroke_color(ToColor32(argb));
-    m_dsc.set_stroke_opa(LV_OPA_COVER);
-    m_dsc.set_stroke_width(fWidth);
-    m_dsc.set_stroke_cap(LV_VECTOR_STROKE_CAP_BUTT);
-    m_dsc.set_stroke_join(LV_VECTOR_STROKE_JOIN_MITER);
-}
-
-// --------------------------------------------------------------------
-
-void Painter::SetBrush(::gui::ARGB argb)
-{
-    m_dsc.set_stroke_opa(LV_OPA_TRANSP);
-    m_dsc.set_fill_color(ToColor32(argb));
-    m_dsc.set_fill_opa(LV_OPA_COVER);
-    m_dsc.set_fill_rule(LV_VECTOR_FILL_NONZERO);
-}
-
-// --------------------------------------------------------------------
-
-void Painter::Emit()
-{
-    m_dsc.add_path(m_path);
-    m_path.clear();
-}
-
-// --------------------------------------------------------------------
-
-const lv_font_t *Painter::CreateFont(const style::Font &font)
-{
-    /* Only the sizes CMake generated exist; pick the closest one. The table
-     * comes straight out of the generated header, so it follows
-     * KANARDIA_FONT_SIZES without anyone having to remember to update it. */
-    struct Entry { int iSize; const lv_font_t *pFont; };
-    static const Entry aFonts[] = {
-#define KANARDIA_FONT_ENTRY(px, sym) { px, &sym },
-        KANARDIA_FONT_LIST(KANARDIA_FONT_ENTRY)
-#undef KANARDIA_FONT_ENTRY
-    };
-
-    const lv_font_t *pBest = aFonts[0].pFont;
-    int iBestDiff = std::abs(font.m_iSize - aFonts[0].iSize);
-    for (const auto &e : aFonts) {
-        const int iDiff = std::abs(font.m_iSize - e.iSize);
-        if (iDiff < iBestDiff) {
-            iBestDiff = iDiff;
-            pBest = e.pFont;
-        }
-    }
-    return pBest;
-}
-
-// --------------------------------------------------------------------
-//  Scale
-// --------------------------------------------------------------------
 
 bool Scale::DrawArc(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const Markings &markings,
     const parameter::Bands &bands,          // Must be in user units!
@@ -118,8 +41,7 @@ bool Scale::DrawArc(
     DrawBands(P, arc, style, bands, colors);
     DrawMajorDashes(P, arc, rScale, col, style.GetMajor(), style.GetOffset().m_fMajorDash, markings.GetMajorStep());
 
-    /* Labels are LVGL draw tasks and the layer runs its tasks in the order they
-     * were added, so the vector work has to be queued before them. */
+    /* Labels must be queued after the vector work -- see Painter.h. */
     P.Flush();
 
     P.SetFont(style.GetFont());
@@ -131,7 +53,7 @@ bool Scale::DrawArc(
 // --------------------------------------------------------------------
 
 void Scale::DrawDash(
-    Painter &P,
+    PainterLike auto &P,
     float fX,
     const Arc2D &arc,
     const RangeF &range,
@@ -149,7 +71,7 @@ void Scale::DrawDash(
 // --------------------------------------------------------------------
 
 void Scale::DrawDash(
-    Painter &P,
+    PainterLike auto &P,
     const Vec2D &ptC,
     float fAngleRad,
     float fR1,
@@ -160,15 +82,14 @@ void Scale::DrawDash(
     float fCA;
     common::SinCos(fAngleRad, &fSA, &fCA);
 
-    auto &path = P.GetPath();
-    path.move_to(ptC.GetX() + fCA*fR1, ptC.GetY() - fSA*fR1);
-    path.line_to(ptC.GetX() + fCA*fR2, ptC.GetY() - fSA*fR2);
+    P.MoveTo(ptC.GetX() + fCA*fR1, ptC.GetY() - fSA*fR1);
+    P.LineTo(ptC.GetX() + fCA*fR2, ptC.GetY() - fSA*fR2);
 }
 
 // --------------------------------------------------------------------
 
 void Scale::DrawLabel(
-    Painter &P,
+    PainterLike auto &P,
     float fX,
     const Arc2D &arc,
     const RangeF &range,
@@ -188,7 +109,7 @@ void Scale::DrawLabel(
 // --------------------------------------------------------------------
 
 void Scale::DrawLabelAt(
-    Painter &P,
+    PainterLike auto &P,
     const Vec2D &ptC,
     float fAngleRad,
     float fR,
@@ -196,11 +117,7 @@ void Scale::DrawLabelAt(
     bool bInside
 )
 {
-    const lv_font_t *pFont = P.GetFont();
-    if (pFont == nullptr) return;
-
-    lv_point_t size{};
-    lv_text_get_size(&size, pszText, pFont, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const Size2D size = P.TextSize(pszText);
 
     float fSA;
     float fCA;
@@ -210,36 +127,17 @@ void Scale::DrawLabelAt(
     float fCX = ptC.GetX() + fCA*fR;
     const float fCY = ptC.GetY() - fSA*fR;
 
-    /* Wide labels near 3 and 9 o'clock would otherwise lean into the scale;
-     * the Qt version applies the same radial correction. */
-    const float fCorr = (size.x - size.y)/2.0f * fCA;
+    /* Wide labels near 3 and 9 o'clock would otherwise lean into the scale. */
+    const float fCorr = (size.fW - size.fH)/2.0f * fCA;
     fCX += bInside ? -fCorr : fCorr;
 
-    lv_area_t area;
-    area.x1 = static_cast<int32_t>(std::lround(fCX - size.x/2.0f));
-    area.y1 = static_cast<int32_t>(std::lround(fCY - size.y/2.0f));
-    area.x2 = area.x1 + size.x - 1;
-    area.y2 = area.y1 + size.y - 1;
-
-    lv_draw_label_dsc_t dsc;
-    lv_draw_label_dsc_init(&dsc);
-    dsc.text       = pszText;
-    dsc.text_local = 1;      /* pszText is a stack buffer; make LVGL copy it */
-    dsc.font       = pFont;
-    /* Always white, whatever the pen is: DrawTextAsPath() in the Qt version
-     * forces white too, which is why labels survive DrawRedDashesIAS() leaving
-     * a red pen behind. */
-    dsc.color      = lv_color_hex(C32_WHITE);
-    dsc.opa        = LV_OPA_COVER;
-    dsc.align      = LV_TEXT_ALIGN_CENTER;
-
-    lv_draw_label(P.GetLayer(), &dsc, &area);
+    P.DrawTextCentred(fCX, fCY, pszText);
 }
 
 // --------------------------------------------------------------------
 
 void Scale::DrawBands(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const style::Style &style,
     const parameter::Bands &bands,
@@ -254,7 +152,7 @@ void Scale::DrawBands(
         if (color == parameter::Color::NoColor)
             continue;
 
-        P.SetPen(colors.GetColor(color), style.GetBand());
+        P.SetPen(colors.GetColor(color), style.GetBand().m_fWidth);
         DrawBand(P, arc, range, bands.GetRange(), fR);
         P.Emit();
     }
@@ -263,7 +161,7 @@ void Scale::DrawBands(
 // --------------------------------------------------------------------
 
 void Scale::DrawMinorDashes(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const RangeF &range,
     ::gui::ARGB col,
@@ -274,7 +172,7 @@ void Scale::DrawMinorDashes(
 {
     if (fMinorStep <= 0) return;
 
-    P.SetPen(col, dashMinor);
+    P.SetPen(col, dashMinor.m_fWidth);
 
     // Minor dashes are drawn using real because the major step
     // may not be a multiplier of minor count.
@@ -289,7 +187,7 @@ void Scale::DrawMinorDashes(
 // --------------------------------------------------------------------
 
 void Scale::DrawMajorDashes(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const RangeF &range,
     ::gui::ARGB col,
@@ -300,7 +198,7 @@ void Scale::DrawMajorDashes(
 {
     if (fMajorStep <= 0) return;
 
-    P.SetPen(col, dashMajor);
+    P.SetPen(col, dashMajor.m_fWidth);
 
     const auto rInside = range.GetInside(fMajorStep);
 
@@ -313,7 +211,7 @@ void Scale::DrawMajorDashes(
 // --------------------------------------------------------------------
 
 void Scale::DrawLabels(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const RangeF &range,
     const Markings &markings,
@@ -347,7 +245,7 @@ void Scale::DrawLabels(
 // --------------------------------------------------------------------
 
 void Scale::DrawBand(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const RangeF &rangeBand,
     const RangeF &rangeScale,
@@ -366,15 +264,14 @@ void Scale::DrawBand(
 // --------------------------------------------------------------------
 
 void Scale::DrawBand(
-    Painter &P,
+    PainterLike auto &P,
     const Vec2D &ptC,
     float fR,
     float fStartDeg,
     float fSpanDeg
 )
 {
-    P.GetPath().append_arc(ptC.GetX(), ptC.GetY(), fR,
-                           ToLvglDeg(fStartDeg), ToLvglDeg(fSpanDeg), false);
+    P.AppendArc(ptC.GetX(), ptC.GetY(), fR, fStartDeg, fSpanDeg);
 }
 
 // --------------------------------------------------------------------
@@ -382,7 +279,7 @@ void Scale::DrawBand(
 // --------------------------------------------------------------------
 
 std::pair<Arc2D, Arc2D> Scale::DrawArcIAS(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const Markings &markings,
     const MarkingsIAS &markingsIAS,
@@ -435,11 +332,11 @@ std::pair<Arc2D, Arc2D> Scale::DrawArcIAS(
     DrawMajorDashes(P, a2, rScale, col, style.GetMajor(), style.GetOffset().m_fMajorDash, markings.GetMajorStep());
     DrawRedDashesIAS(P, a2, bands, colors, styleIAS.GetRedDash(), styleIAS.GetOffset().m_fRedDash);
 
-    /* Labels are LVGL tasks; queue the vector work before them. */
+    /* Queue the vector work before the labels. */
     P.Flush();
     DrawLabels(P, a2, rScale, markings, style.GetOffset().m_fLabel);
 
-    /* V-markings go on top of the labels, so they are a task of their own. */
+    /* V-markings go on top of the labels, so they are a batch of their own. */
     DrawVMarkings(P, a2, style, styleIAS, bands.GetRange(), markingsIAS.GetVMarkings());
     P.Flush();
 
@@ -450,7 +347,7 @@ std::pair<Arc2D, Arc2D> Scale::DrawArcIAS(
 
 /* Will not draw the final red band -- DrawRedDashesIAS() marks it instead. */
 void Scale::DrawBandsIAS(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const style::Style &style,
     const parameter::Bands &bands,
@@ -464,7 +361,7 @@ void Scale::DrawBandsIAS(
         if (color == parameter::Color::NoColor || color == parameter::Color::Red)
             continue;
 
-        P.SetPen(colors.GetColor(color), style.GetBand());
+        P.SetPen(colors.GetColor(color), style.GetBand().m_fWidth);
         DrawBand(P, arc, range, bands.GetRange(), fR);
         P.Emit();
     }
@@ -473,7 +370,7 @@ void Scale::DrawBandsIAS(
 // --------------------------------------------------------------------
 
 void Scale::DrawWhiteBand(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const RangeF &whiteRange,
     const RangeF &range,
@@ -483,7 +380,7 @@ void Scale::DrawWhiteBand(
 {
     if (whiteRange.IsValidNonEmpty() == false) return;
 
-    P.SetPen(C32_WHITE, bandWhite);
+    P.SetPen(C32_WHITE, bandWhite.m_fWidth);
     DrawBand(P, arc, whiteRange, range, arc.GetRadius() + fOffset);
     P.Emit();
 }
@@ -491,7 +388,7 @@ void Scale::DrawWhiteBand(
 // --------------------------------------------------------------------
 
 void Scale::DrawRedDashesIAS(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const parameter::Bands &bands,
     const parameter::gui::Colors &colors,
@@ -504,7 +401,7 @@ void Scale::DrawRedDashesIAS(
             continue;
 
         const auto range = bands.GetRange(i);
-        P.SetPen(colors.GetColor(parameter::Color::Red), redDash);
+        P.SetPen(colors.GetColor(parameter::Color::Red), redDash.m_fWidth);
         DrawDash(P, range.GetLow(), arc, bands.GetRange(), redDash.m_fLength, fOffset);
         P.Emit();
     }
@@ -513,7 +410,7 @@ void Scale::DrawRedDashesIAS(
 // --------------------------------------------------------------------
 
 void Scale::DrawVMarkings(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const style::Style &style,
     const style::StyleIAS &styleIAS,
@@ -530,7 +427,7 @@ void Scale::DrawVMarkings(
 // --------------------------------------------------------------------
 
 void Scale::DrawVMark(
-    Painter &P,
+    PainterLike auto &P,
     const Arc2D &arc,
     const style::Style &style [[maybe_unused]],
     const style::StyleIAS &styleIAS,
@@ -565,14 +462,14 @@ void Scale::DrawVMark(
         P.Emit();
     }
     else {
-        ESP_LOGW(TAG, "unknown VMark shape %d", static_cast<int>(mark.m_eShape));
+        PRINTF("Unknown VMark shape %d\n", static_cast<int>(mark.m_eShape));
     }
 }
 
 // --------------------------------------------------------------------
 
 void Scale::DrawTriangle(
-    Painter &P,
+    PainterLike auto &P,
     float fX,
     const Arc2D &arc,
     const RangeF &range,
@@ -588,7 +485,7 @@ void Scale::DrawTriangle(
 // --------------------------------------------------------------------
 
 void Scale::DrawTriangle(
-    Painter &P,
+    PainterLike auto &P,
     const Vec2D &ptC,
     float fAngleRad,
     float fRadius,
@@ -600,26 +497,48 @@ void Scale::DrawTriangle(
     float fCA;
     common::SinCos(fAngleRad, &fSA, &fCA);
 
-    auto &dsc  = P.GetDraw();
-    auto &path = P.GetPath();
+    P.PushTransform(ptC.GetX() + fCA*fRadius, ptC.GetY() - fSA*fRadius,
+                    common::Deg(fAngleRad));
 
-    /* Built in local space with +x pointing radially outward, exactly as the Qt
-     * version does: apex inward, base sitting on the arc. */
-    path.move_to(0.0f, -fLength);
-    path.line_to(-fLength*3/2, 0.0f);
-    path.line_to(0.0f, fLength);
-    path.close();
+    /* Built in local space with +x pointing radially outward: apex inward,
+     * base sitting on the arc. */
+    P.MoveTo(0.0f, -fLength);
+    P.LineTo(-fLength*3/2, 0.0f);
+    P.LineTo(0.0f, fLength);
+    P.ClosePath();
 
-    if (bDot) {
-        const float fR = fLength*0.3f;
-        path.append_circle(fLength*1.2f, 0.0f, fR, fR);
-    }
+    if (bDot)
+        P.AppendCircle(fLength*1.2f, 0.0f, fLength*0.3f);
 
-    dsc.identity();
-    dsc.translate(ptC.GetX() + fCA*fRadius, ptC.GetY() - fSA*fRadius);
-    dsc.rotate(-common::Deg(fAngleRad));
+    /* Inside the bracket: ThorVG captures the matrix as the path is taken. */
     P.Emit();
-    dsc.identity();
+    P.PopTransform();
 }
 
-}} // namespace scale::tvg
+// --------------------------------------------------------------------
+//  Back ends
+//
+//  Instantiating the two entry points pulls in every helper they reach, so
+//  these four lines are the whole list. PainterQt.h is empty without Qt, hence
+//  the guard.
+// --------------------------------------------------------------------
+
+template bool Scale::DrawArc<PainterTvg>(PainterTvg &, const Arc2D &, const Markings &,
+    const parameter::Bands &, const parameter::gui::Colors &, const style::Style &);
+
+template std::pair<Arc2D, Arc2D> Scale::DrawArcIAS<PainterTvg>(PainterTvg &, const Arc2D &,
+    const Markings &, const MarkingsIAS &, const parameter::Bands &,
+    const parameter::gui::Colors &, const style::Style &, const style::StyleIAS &);
+
+#if defined(QT_CORE_LIB)
+
+template bool Scale::DrawArc<PainterQt>(PainterQt &, const Arc2D &, const Markings &,
+    const parameter::Bands &, const parameter::gui::Colors &, const style::Style &);
+
+template std::pair<Arc2D, Arc2D> Scale::DrawArcIAS<PainterQt>(PainterQt &, const Arc2D &,
+    const Markings &, const MarkingsIAS &, const parameter::Bands &,
+    const parameter::gui::Colors &, const style::Style &, const style::StyleIAS &);
+
+#endif
+
+} // namespace scale

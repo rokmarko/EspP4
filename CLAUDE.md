@@ -195,7 +195,7 @@ so the container's "identified" count stays at zero on a bus where nobody
 answers -- correct, not a fault. `USE_CAN_DDS_B` and `USE_CAN_MCS_B` are the
 receive half of the parameter push described below.
 
-**There is no CAN transceiver on this board**, so the TWAI pins go nowhere.
+**There is CAN transceiver on this board**, GPIO30, GPIO33
 `Mode::SelfTest` is the default and exercises the whole path anyway: RX is
 mapped onto the TX pin so the GPIO matrix loops the signal back, the controller
 runs in `TWAI_MODE_NO_ACK` (nobody is there to acknowledge), and frames are
