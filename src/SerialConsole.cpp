@@ -18,6 +18,11 @@
 //   h   help
 //   i   print one <<<STATS ...>>> line
 //   t   toggle scene, as a screen tap would
+//   m   move the settings page's selection one row down, wrapping
+//   M   activate what the selection rests on, as a tap would
+//
+// The settings page also takes the terminal's own keys: the arrows, Enter and
+// Esc, decoded below. `m` and `M` are the unambiguous aliases a script wants.
 //   w   write the option blobs to NVS, then print <<<SAVE ...>>>
 //   P   push a parameter at ourselves over CAN (self-test only)
 //   s   screenshot at half resolution  (fast, ~360x360)
@@ -38,6 +43,7 @@
 #include "CanPort.h"
 #include "CanProcessor.h"
 #include "Platform.h"
+#include "MenuPage.h"
 #include "StorageOptions.h"
 #include "VectorScene.h"
 
@@ -169,7 +175,7 @@ void PrintStats()
 		"<<<STATS scene=%s frame_ms=%d.%d heap_int=%u heap_psram=%u "
 		"rpm=%d eng=%d moving=%d model_stack=%u "
 		"can=%s can_rx=%u can_tx=%u can_nod=%u can_alive=%d can_ident=%d can_err=%u can_state=%u "
-		"nvs=%s nvs_opt=%u nvs_used=%u/%u heap_int_min=%u can_push=%u>>>\n",
+		"nvs=%s nvs_opt=%u nvs_used=%u/%u heap_int_min=%u can_push=%u menu=%s menu_sel=%d>>>\n",
 		demo::SceneName(),
 		tenths / 10,
 		tenths % 10,
@@ -195,7 +201,9 @@ void PrintStats()
 						// a random point in a ThorVG frame and swings by tens of kB;
 						// this is the figure that says whether the margin is real.
 		static_cast<unsigned>(heap.uMinFreeInternal),
-		static_cast<unsigned>(app::ParameterPushCount())
+		static_cast<unsigned>(app::ParameterPushCount()),
+		menu::LevelName(),
+		menu::Selection()
 	);
 	WriteStr(line);
 }
@@ -289,11 +297,45 @@ void Screenshot(int step)
 
 void Help()
 {
-	WriteStr("<<<HELP h=help i=stats t=toggle w=save-settings P=push-param s=shot-half S=shot-full>>>\n");
+	WriteStr(
+		"<<<HELP h=help i=stats t=toggle m=menu-next M=menu-activate "
+		"w=save-settings P=push-param s=shot-half S=shot-full>>>\n"
+	);
+}
+
+// An arrow key is three bytes on the wire -- Esc [ A..D -- so a byte at a time
+// needs somewhere to remember how far through one we are.
+//
+// A bare Esc is only acted on once the next byte arrives, and that byte is then
+// handled as a command in its own right. That is the ambiguity every terminal
+// lives with; here it costs nothing, because the only thing Esc does is walk
+// the settings page back one level.
+enum class KeySeq : uint8_t
+{
+	None,
+	Esc,  // saw Esc, waiting to see whether a '[' follows
+	Csi	 // saw Esc [, waiting for the letter
+};
+
+constexpr uint8_t ESC = 0x1B;
+
+// The arrow an Esc [ sequence ends in. Returns false for anything else, which
+// the caller then treats as an ordinary command byte.
+bool ArrowKey(uint8_t c, menu::Key& eKey)
+{
+	switch(c) {
+	case 'A': eKey = menu::Key::Up; return true;
+	case 'B': eKey = menu::Key::Down; return true;
+	case 'C': eKey = menu::Key::Right; return true;
+	case 'D': eKey = menu::Key::Left; return true;
+	default:	 return false;
+	}
 }
 
 void ConsoleTask(void*)
 {
+	KeySeq eSeq = KeySeq::None;
+
 	WriteStr("<<<CONSOLE ready>>>\n");
 	for(;;) {
 		uint8_t		 c = 0;
@@ -305,9 +347,31 @@ void ConsoleTask(void*)
 			platform::SleepMs(50);
 			continue;
 		}
+		if(eSeq == KeySeq::Esc) {
+			eSeq = (c == '[') ? KeySeq::Csi : KeySeq::None;
+			if(eSeq == KeySeq::Csi)
+				continue;
+			// Not a sequence after all -- it really was Esc, and c is the next
+			// command.
+			menu::HandleKey(menu::Key::Esc);
+		}
+		else if(eSeq == KeySeq::Csi) {
+			eSeq = KeySeq::None;
+			menu::Key eKey;
+			if(ArrowKey(c, eKey)) {
+				menu::HandleKey(eKey);
+				continue;
+			}
+			// Some other CSI -- a function key, a mouse report. Let the final
+			// byte fall through as a command rather than swallowing it.
+		}
+
 		switch(c) {
 		case 'h': Help(); break;
 		case 'i': PrintStats(); break;
+		case 'm': menu::HandleKey(menu::Key::Down); break;
+		case 'M': menu::HandleKey(menu::Key::Enter); break;
+		case ESC: eSeq = KeySeq::Esc; break;
 		case 't':
 			demo::ToggleScene();
 			PrintStats();
@@ -317,7 +381,7 @@ void ConsoleTask(void*)
 		case 's':  Screenshot(2); break;
 		case 'S':  Screenshot(1); break;
 		case '\r':
-		case '\n': break;
+		case '\n': menu::HandleKey(menu::Key::Enter); break;
 		default:	  break;
 		}
 	}

@@ -63,7 +63,23 @@ python3 .claude/skills/run-espp4/driver.py monitor --secs 10
 python3 .claude/skills/run-espp4/driver.py shot --scene scale   --out scale.png
 python3 .claude/skills/run-espp4/driver.py shot --scene altimeter --full --out alt.png
 python3 .claude/skills/run-espp4/driver.py shot --scene rpm       --out rpm.png
+python3 .claude/skills/run-espp4/driver.py shot --scene menu --full --out menu.png
 ```
+
+`--scene menu` lands on the settings page at its root level. There is no
+switch for what is below it: drive it with the keys -- the arrows, Enter and
+Esc, or the `m`/`M` aliases -- and read `menu=` and `menu_sel=` back out of
+`<<<STATS>>>` to see where you are. `menu_sel=-1` is the title bar, where Enter
+goes up a level and, at the root, saves and leaves the page.
+
+Two traps of the console's own:
+
+- **A bare `Esc` is only acted on when the next byte arrives.** It cannot be
+  told from the start of an arrow sequence until then. That next byte is still
+  handled as a command, so `\x1b` followed by `i` does both.
+- **`\r` and `\n` are Enter now.** A stray newline on the settings page will
+  activate whatever the selection rests on. `m`/`M` never have either problem,
+  which is why they are still there.
 
 The same, in the simulator — every subcommand takes `--sim`, and each one
 starts the simulator, drives it and stops it again:
@@ -177,10 +193,15 @@ Single bytes, no newline. Useful if you talk to the port directly:
 | byte | effect |
 |---|---|
 | `h` | `<<<HELP ...>>>` |
-| `i` | `<<<STATS scene=… frame_ms=… heap_int=… heap_psram=… rpm=… eng=… moving=… model_stack=… can_*=… nvs=… nvs_opt=… nvs_used=…>>>` |
+| `i` | `<<<STATS scene=… frame_ms=… heap_int=… heap_psram=… rpm=… eng=… moving=… model_stack=… can_*=… nvs=… nvs_opt=… nvs_used=… menu=… menu_sel=…>>>` |
 | `w` | write the option blobs to the settings store, then `<<<SAVE ok=… written=… used=…>>>` |
 | `P` | push a parameter at ourselves over CAN, then `<<<PUSH ok=… pushes=…>>>` |
 | `t` | toggle scene, as a screen tap would |
+| `m` | move the settings page's selection one row down, wrapping through the title bar |
+| `M` | activate what the selection rests on, as a tap would (a row, or the title bar: up a level / out of the page) |
+| arrows | `Esc [ A`..`D` -- up/left step the selection back, down/right step it on |
+| `\r` | Enter: activate the selection |
+| `Esc` | up one level, or out of the page at the root |
 | `s` | screenshot, every 2nd pixel (360×360, ~1.8 s) |
 | `S` | screenshot, full 720×720 (~3.7 s) |
 

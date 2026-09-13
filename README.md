@@ -14,16 +14,28 @@ Tap the screen to cycle the scenes:
 | `ias`       | airspeed indicator -- `Scale::DrawArcIAS()`: coloured arcs, white flap band, Vne radial, V-speed marks |
 | `altimeter` | three-pointer altimeter, full-circle scale, hundreds / thousands / ten-thousands hands |
 | `rpm`       | engine and rotor tachometers side by side, scales mirrored `)(`, a marker riding each |
+| `menu`      | the settings page: a menu of levels under an eye-shaped title bar cut to the round glass |
 
 The four instrument scenes are drawn from the shared Kanardia `Public/Common`
 code and read their values from a `parameter::ParameterContainer`. A live `ms/frame` readout
 shows what one ThorVG frame actually costs.
 
+The settings page ([src/MenuPage.h](src/MenuPage.h)) is a screen of its own and
+a view onto `app::Options` -- the same option container every Kanardia product
+keeps. A row asks the option what it holds and a tap hands the next value
+back; Common already knows which units a group allows, so the level table is
+close to one line per row. The frame timer stops while it is up.
+
+It is also navigable by key -- up/down to move, Enter to activate, Esc to go
+back -- which works out of the box against the simulator's SDL keyboard and
+would work against a keypad or a rotary knob on the board. Changes are written
+once, on the way out.
+
 It is built twice from one set of sources: as firmware for the board, and as a
 **desktop simulator** that puts the same UI in an SDL window. See
 [Two builds](#two-builds).
 
-**Status:** running on hardware. Boot, panel, touch, all four scenes, the model
+**Status:** running on hardware. Boot, panel, touch, all five scenes, the model
 loop and screenshot capture verified on a rev v1.3 board over `/dev/ttyACM0`.
 The simulator runs the same scenes, model, CAN stack and console on a desktop.
 
@@ -251,12 +263,13 @@ src/                     the product -- no operating system named anywhere in he
   Painter.h              the drawing back end the scale is written against
   PainterTvg.h/.cpp      that concept on ThorVG/LVGL; PainterQt.h is the Qt twin
   ScaleDraw.h/.cpp       the Kanardia scale, drawn once, against either back end
+  MenuPage.h/.cpp        the settings page: menu levels over an eye-shaped title bar
   CanProcessor.h/.cpp    CANaerospace decode: NOD, units, pushed-parameter receive
   ApplicationDefines.h   our CAN node id and the services we implement
   AppOptions.h/.cpp      the option set we keep, and the keys Settings walks
   AppParameters.h/.cpp   parameter::ParameterContainer, fed from the NOD
   StorageOptions.h/.cpp  the options and the parameter blob, over a BlobStore
-  SerialConsole.h/.cpp   debug console: stats, scene toggle, save settings, screenshot
+  SerialConsole.h/.cpp   debug console: stats, scene and menu toggle, save settings, screenshot
   KanardiaCommon.h       Qt shim so Public/Common compiles for both targets
 port/esp/                the board
   MainEsp.cpp            starts the BSP display, hands over to app::Startup()

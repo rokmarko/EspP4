@@ -115,9 +115,11 @@ The firmware carries a one-character debug console -- USB-Serial/JTAG on the
 board, stdin/stdout in the simulator, the same protocol on both
 (`src/SerialConsole.cpp`): `i` stats (scene, frame time, heap, the model's
 rpm/eng/moving/stack, the CAN counters, the NVS entry count and the internal
-heap low-water mark), `t` toggle scene, `w` write the option blobs to NVS,
-`P` push a parameter at ourselves over CAN, `s`/`S` screenshot as base64
-RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
+heap low-water mark, plus the settings page's level and selection), `t` toggle
+scene, the terminal's own arrows / Enter / Esc to drive the settings page
+(`m`/`M` are unambiguous aliases for down and Enter), `w` write the option
+blobs to NVS, `P` push a parameter at ourselves over CAN, `s`/`S` screenshot as
+base64 RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
 `driver.py`, which is how you smoke-test either build or get a PNG of the panel
 without looking at it -- `--sim` picks the simulator. Read that SKILL.md before
 touching serial or snapshots -- it lists the traps (port-open resets the chip,
@@ -311,9 +313,58 @@ settings store.
 
 Scenes cycle `gauge` -> `scale` (tachometer, `Scale::DrawArc`) -> `ias`
 (airspeed, `Scale::DrawArcIAS`) -> `altimeter` (three pointers over a
-full-circle `DrawArc`) -> `rpm` (engine and rotor side by side).
+full-circle `DrawArc`) -> `rpm` (engine and rotor side by side) -> `menu` (the
+settings page, which is not an instrument at all -- see below).
 `Arc2D::IsCircle()` is what makes the altimeter drop the label that would
 otherwise land on top of its zero.
+
+**The settings page is a screen of its own.** `src/MenuPage.h/.cpp` is a menu
+of levels -- units per group, the azimuth reference, the UTC offset, a few
+system actions -- and it is a view onto `app::Options` and nothing else: a row
+asks the option what it holds every time it is drawn, and a tap hands the next
+value straight back. Common already knows which units a group allows
+(`parameter::unit_group_util::GetUnits()`) and what the group is called, so the
+level table is mostly one line per row.
+
+Four things to know:
+
+- **It is a second `lvgl::Screen`, not a sixth face.** Nothing on it moves, so
+  `Scene::NextMode()` pauses the frame timer on the way in and resumes it on
+  the way out. A ThorVG frame costs up to 60 ms on this panel and a settings
+  page has no business paying that.
+- **The title bar is an eye**: the panel's own circle for the upper lid, a much
+  shallower arc bulging the other way for the lower one, the two meeting in a
+  point at each side, filled with a gradient in the level's accent colour. It
+  is drawn on a 720x216 ARGB8888 canvas, and only when the level changes.
+  `lv_vector_path_append_arc()` starts a subpath of its own, so the two lids
+  cannot be two arcs -- they would fill as two separate shapes; the outline is
+  walked as line segments instead.
+- **The page never loads anybody else's screen.** Leaving the root level calls
+  the `menu::CloseHandler` `VectorScene.cpp` registered, which is the same step
+  out of `Mode::Menu` a tap on an instrument would make. `menu::CreatePage()`
+  is therefore called last in `Scene::Build()`, after `Screen::active()` has
+  been taken.
+- **Changes are written once, on the way out**, plus on demand from the System
+  level. Saving per tap would stall the LVGL task inside a flash write in every
+  single row.
+- **A tap is acted on from `lv_async_call()`, not from the click itself.**
+  Entering a submenu rebuilds the rows, and the row being tapped is one of the
+  objects that would be deleted -- while LVGL is still walking its event list.
+- **The page carries a selection a finger never moves.** It rests on the title
+  bar, where it marks nothing, until a key steps it: up/left back, down/right
+  on, Enter activates, Esc goes up a level -- and out of the page at the root.
+  That is also the only way to reach a submenu or a value from the host.
+- **Keys arrive through an LVGL group, because there is no other route.** A
+  keypad input device with no group delivers a key to nothing at all, so the
+  page keeps a group holding one object -- its own screen -- purely as
+  somewhere for LVGL to deliver `LV_EVENT_KEY`; the group's focus never moves,
+  the page's selection does. It points every keypad and encoder device at that
+  group while it is up and away from it when it is not, so the simulator's SDL
+  keyboard drives it as it stands and a knob would drive it on the board
+  (`lv_group_set_editing()` is what makes an encoder send its two directions as
+  keys instead of walking the focus). `menu::HandleKey()` is the entry point,
+  and it takes `menu::Key`, not `LV_KEY_*`, so the console does not have to
+  include LVGL to say "down".
 
 **The dual tachometer is two ordinary `DrawArc()` calls.** What makes the ")("
 layout is only where the two `Arc2D` centres sit and which way the spans run:

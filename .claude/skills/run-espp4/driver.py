@@ -545,7 +545,7 @@ def main():
     sp.add_argument("--out", default="panel.png")
     sp.add_argument("--full", action="store_true", help="720x720 instead of 360x360")
     sp.add_argument("--timeout", type=float, default=120)
-    sp.add_argument("--scene", choices=["gauge", "scale", "ias", "altimeter", "rpm"],
+    sp.add_argument("--scene", choices=["gauge", "scale", "ias", "altimeter", "rpm", "menu"],
                     help="switch to this scene first, verifying via stats")
     sp.set_defaults(fn=cmd_shot)
 

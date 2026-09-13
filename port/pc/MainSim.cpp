@@ -64,7 +64,8 @@ void Usage(const char* pszSelf)
 		"ESPP4_SIM_STATE; the switches simply set those.\n"
 		"\n"
 		"The one-character debug console is on stdin: h for help, i for\n"
-		"stats, t to change scene, s or S for a screenshot.\n",
+		"stats, t to change scene, s or S for a screenshot. The settings\n"
+		"page takes the arrows, Enter and Esc, there and in the window.\n",
 		pszSelf
 	);
 }

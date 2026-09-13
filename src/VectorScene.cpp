@@ -22,6 +22,7 @@
 
 #include "AppModel.h"
 #include "KanardiaFont.h"
+#include "MenuPage.h"
 #include "ScaleDrawTvg.h"
 #include "AppParameters.h"
 #include "Avio/Format/AvioFormat.h"
@@ -167,7 +168,12 @@ public:
 		Scale,
 		Ias,
 		Altimeter,
-		Rpm
+		Rpm,
+		// Not an instrument at all: the settings page, on a screen of its own.
+		// It is in this cycle because it is what a tap already does, and
+		// because it keeps one name -- SceneName() -- answering for the whole
+		// UI, which is what the host drives screenshots with.
+		Menu
 	};
 
 	bool Build();
@@ -254,6 +260,11 @@ private:
 	scale::style::Style m_rpmStyle;
 	scale::Arc2D		  m_engRpmArc;
 	scale::Arc2D		  m_rotRpmArc;
+
+	// Whether the settings page was built. It shares this board's PSRAM with
+	// the instrument canvas; if there was no room for its header, the cycle
+	// simply skips it rather than loading an empty screen.
+	bool m_bMenu = false;
 
 	Mode	m_eMode		= Mode::Gauge;
 	float m_fPhase		= 0.0f;	  // degrees, wraps at 360
@@ -897,6 +908,9 @@ void Scene::Tick()
 		m_valueLabel->set_text(Readout(m_fRpm, Function::EngineRPM, unit::Key::RPM).c_str());
 		m_valueLabel2->set_text(Readout(m_fRotorRpm, Function::RotorRPM, unit::Key::RPM).c_str());
 		break;
+	// The timer is paused while the settings page is up, so this is never
+	// reached from there -- but the switch still has to name it.
+	case Mode::Menu: break;
 	}
 
 	m_canvas->invalidate();
@@ -910,19 +924,42 @@ const char* Scene::ModeName() const
 	case Mode::Ias:		 return "ias";
 	case Mode::Altimeter: return "altimeter";
 	case Mode::Rpm:		 return "rpm";
+	case Mode::Menu:		 return "menu";
 	}
 	return "?";
 }
 
 void Scene::NextMode()
 {
+	const bool bWasMenu = (m_eMode == Mode::Menu);
+
 	switch(m_eMode) {
 	case Mode::Gauge:		 m_eMode = Mode::Scale; break;
 	case Mode::Scale:		 m_eMode = Mode::Ias; break;
 	case Mode::Ias:		 m_eMode = Mode::Altimeter; break;
 	case Mode::Altimeter: m_eMode = Mode::Rpm; break;
-	case Mode::Rpm:		 m_eMode = Mode::Gauge; break;
+	case Mode::Rpm:		 m_eMode = m_bMenu ? Mode::Menu : Mode::Gauge; break;
+	case Mode::Menu:		 m_eMode = Mode::Gauge; break;
 	}
+
+	// The settings page is a screen of its own and nothing on it moves, so the
+	// frame timer stops on the way in and starts again on the way out. That is
+	// the whole reason it is not a sixth face: a ThorVG frame costs up to 60 ms
+	// on this panel, and there would be nothing in it to draw.
+	if(m_eMode == Mode::Menu) {
+		m_timer->pause();
+		menu::Show();
+		APP_LOGI(TAG, "mode -> %s", ModeName());
+		return;
+	}
+	// The page never puts itself away: leaving the root level calls back into
+	// here, and so does an ordinary tap or `t`, so this is the one place that
+	// knows the page is done. It releases the keys and saves there.
+	if(bWasMenu)
+		menu::Hide();
+
+	m_screen->load();
+	m_timer->resume();
 
 	// The readout has to dodge whatever each face already puts nearby. The ASI
 	// sweeps 300 degrees from the top, so its only clear ground is the gap
@@ -936,6 +973,7 @@ void Scene::NextMode()
 		case Mode::Ias:		 return -46;
 		case Mode::Altimeter: return 66;
 		case Mode::Rpm:		 return 150;
+		case Mode::Menu:		 return 0;
 		}
 		return 0;
 	}();
@@ -1053,11 +1091,26 @@ bool Scene::Build()
 	m_screen->on_click([this](lvgl::Event&) { NextMode(); });
 	m_timer.emplace(FRAME_MS, [this](Timer*) { Tick(); });
 
+	// Last, and on purpose: menu::CreatePage() makes a second screen, and this
+	// one has to have taken Screen::active() -- the screen the port booted
+	// with -- before anybody else creates one.
+	m_bMenu = menu::CreatePage();
+	if(m_bMenu == false)
+		APP_LOGE(TAG, "settings page not available");
+
 	APP_LOGI(TAG, "canvas %dx%d ARGB8888 ready", static_cast<int>(CANVAS_SIZE), static_cast<int>(CANVAS_SIZE));
 	return true;
 }
 
 Scene g_scene;
+
+// The settings page has no way back of its own -- it never loads anybody
+// else's screen. Leaving its root level lands here, which is the same step out
+// of Mode::Menu that a tap on an instrument would make.
+void LeaveMenu()
+{
+	g_scene.NextMode();
+}
 
 } // namespace
 
@@ -1065,7 +1118,10 @@ namespace demo {
 
 bool CreateScene()
 {
-	return g_scene.Build();
+	const bool bOk = g_scene.Build();
+	if(bOk)
+		menu::SetCloseHandler(LeaveMenu);
+	return bOk;
 }
 
 void ToggleScene()

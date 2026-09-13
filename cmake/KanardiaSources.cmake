@@ -51,6 +51,7 @@ set(KANARDIA_APP_SOURCES
     ${KANARDIA_ROOT}/src/AppOptions.cpp
     ${KANARDIA_ROOT}/src/AppParameters.cpp
     ${KANARDIA_ROOT}/src/CanProcessor.cpp
+    ${KANARDIA_ROOT}/src/MenuPage.cpp
     ${KANARDIA_ROOT}/src/PainterTvg.cpp
     ${KANARDIA_ROOT}/src/ScaleDraw.cpp
     ${KANARDIA_ROOT}/src/SerialConsole.cpp
