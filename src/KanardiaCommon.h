@@ -24,7 +24,15 @@
 
 #include "Gui/Rgb.h"
 
+// <cstring> is here for CanPort/CanuCan.cpp, which calls memset() without
+// including anything that declares it -- Qt's headers get there first in the
+// products that build it. This header is force-included into every Common
+// source we compile (see cmake/KanardiaSources.cmake), which makes it the one
+// place to put that right without touching the shared tree.
 #include <concepts>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <type_traits>
 
 namespace common {
@@ -58,6 +66,21 @@ using QRgb = ::gui::ARGB;
 constexpr QRgb qRgb(int r, int g, int b)
 {
 	return ::gui::GetRGB(r, g, b);
+}
+
+// Qt's printf-style qDebug().
+//
+// CanPort/CanuCan.cpp -- the desktop CAN port, which the simulator build
+// compiles -- reports a failed write with it. Qt's other spelling is the
+// stream, `qDebug() << x`, and nothing this product builds out of Common uses
+// that; if something ever does, it wants a real shim rather than this one.
+inline void qDebug(const char* pszFmt, ...)
+{
+	va_list args;
+	va_start(args, pszFmt);
+	std::vfprintf(stderr, pszFmt, args);
+	va_end(args);
+	std::fputc('\n', stderr);
 }
 
 #endif // !QT_CORE_LIB

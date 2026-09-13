@@ -19,10 +19,8 @@
 
 #include "VectorScene.h"
 
-#include "esp_log.h"
-#include "esp_timer.h"
+#include "Platform.h"
 
-#include "bsp/esp-bsp.h"
 #include "lvgl_cpp.h"
 
 #include "AppModel.h"
@@ -39,10 +37,10 @@
 #include <vector>
 
 #if !LV_USE_VECTOR_GRAPHIC
-#error "Enable CONFIG_LV_USE_VECTOR_GRAPHIC (LVGL -> Others -> Enable Vector Graphic APIs)"
+#error "Enable LV_USE_VECTOR_GRAPHIC (CONFIG_LV_USE_VECTOR_GRAPHIC on the board, lv_conf.h in the simulator)"
 #endif
 #if !LV_USE_THORVG_INTERNAL
-#error "Enable CONFIG_LV_USE_THORVG and CONFIG_LV_USE_THORVG_INTERNAL"
+#error "Enable LV_USE_THORVG and LV_USE_THORVG_INTERNAL"
 #endif
 
 namespace {
@@ -402,7 +400,7 @@ void Scene::RefreshBands()
 	m_rotBands = ParameterBands(can::Id::RotorRPM_1);
 	m_iasBands = ParameterBands(can::Id::IndicatedAirspeed);
 	m_altBands = ParameterBands(can::Id::BaroCorrectedAltitude);
-	ESP_LOGI(TAG, "scale bands refreshed from the parameter container");
+	APP_LOGI(TAG, "scale bands refreshed from the parameter container");
 }
 
 // -----------------------------------------------------------------------------
@@ -844,7 +842,7 @@ void Scene::Tick()
 		m_fAltFeet	= 150.0f * m_fValue;
 	}
 
-	const int64_t t0 = esp_timer_get_time();
+	const int64_t t0 = platform::Micros();
 
 	// Opaque background: the display blits the canvas without alpha blending.
 	m_canvas->fill_bg(Color(BG_COLOR), LV_OPA_COVER);
@@ -871,7 +869,7 @@ void Scene::Tick()
 	}
 	m_canvas->finish_layer(&layer);  // waits for the draw units
 
-	const float ms = static_cast<float>(esp_timer_get_time() - t0) / 1000.0f;
+	const float ms = static_cast<float>(platform::Micros() - t0) / 1000.0f;
 	m_fRenderMs		= m_fRenderMs == 0.0f ? ms : m_fRenderMs * 0.9f + ms * 0.1f;
 
 	const int ms_x10 = static_cast<int>(m_fRenderMs * 10.0f + 0.5f);
@@ -957,7 +955,7 @@ void Scene::NextMode()
 	m_valueLabel2->align(Align::Center, 72, iOffsetY);
 	m_glyphs->style().opa(m_eMode == Mode::Gauge ? Opacity::Cover : Opacity::Transparent);
 	m_hint->set_text_fmt("tap  -  %s", ModeName());
-	ESP_LOGI(TAG, "mode -> %s", ModeName());
+	APP_LOGI(TAG, "mode -> %s", ModeName());
 }
 
 // -----------------------------------------------------------------------------
@@ -977,7 +975,7 @@ bool Scene::Build()
 
 	m_buf.emplace(static_cast<uint32_t>(CANVAS_SIZE), static_cast<uint32_t>(CANVAS_SIZE), lvgl::ColorFormat::ARGB8888);
 	if(m_buf->raw() == nullptr) {
-		ESP_LOGE(
+		APP_LOGE(
 			TAG,
 			"no room for a %dx%d ARGB8888 canvas (%d kB)",
 			static_cast<int>(CANVAS_SIZE),
@@ -993,7 +991,10 @@ bool Scene::Build()
 	m_canvas->center();
 	m_canvas->remove_flag(ObjFlag::Clickable);
 
-	m_title.emplace(*m_screen, "ESP32-P4  -  LVGL 9  -  ThorVG");
+	// Which build drew this, so a screenshot says so on its face: "esp32p4" off
+	// the panel, "sim" off a desktop.
+	m_title.emplace(*m_screen, "");
+	m_title->set_text_fmt("%s  -  LVGL 9  -  ThorVG", platform::Name());
 	m_title->style().text_font(&lv_font_kanardia_20).text_color(Color(0x9FB6E0));
 	m_title->align(Align::TopMid, 0, 96);
 
@@ -1055,7 +1056,7 @@ bool Scene::Build()
 	m_screen->on_click([this](lvgl::Event&) { NextMode(); });
 	m_timer.emplace(FRAME_MS, [this](Timer*) { Tick(); });
 
-	ESP_LOGI(TAG, "canvas %dx%d ARGB8888 ready", static_cast<int>(CANVAS_SIZE), static_cast<int>(CANVAS_SIZE));
+	APP_LOGI(TAG, "canvas %dx%d ARGB8888 ready", static_cast<int>(CANVAS_SIZE), static_cast<int>(CANVAS_SIZE));
 	return true;
 }
 
@@ -1072,9 +1073,9 @@ bool CreateScene()
 
 void ToggleScene()
 {
-	bsp_display_lock(UINT32_MAX);
+	platform::LockDisplay();
 	g_scene.NextMode();
-	bsp_display_unlock();
+	platform::UnlockDisplay();
 }
 
 const char* SceneName()
@@ -1093,12 +1094,12 @@ bool CaptureScreenshot(int step, PixelSink sink, void* ctx, int32_t* out_w, int3
 		step = 1;
 
 	// Snapshot under the lock, then let the UI carry on while we stream it.
-	bsp_display_lock(UINT32_MAX);
+	platform::LockDisplay();
 	lv_draw_buf_t* snap = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB888);
-	bsp_display_unlock();
+	platform::UnlockDisplay();
 
 	if(snap == nullptr) {
-		ESP_LOGE(TAG, "snapshot allocation failed");
+		APP_LOGE(TAG, "snapshot allocation failed");
 		return false;
 	}
 
@@ -1135,9 +1136,9 @@ bool CaptureScreenshot(int step, PixelSink sink, void* ctx, int32_t* out_w, int3
 		}
 	}
 
-	bsp_display_lock(UINT32_MAX);
+	platform::LockDisplay();
 	lv_draw_buf_destroy(snap);
-	bsp_display_unlock();
+	platform::UnlockDisplay();
 
 	if(out_w)
 		*out_w = dst_w;

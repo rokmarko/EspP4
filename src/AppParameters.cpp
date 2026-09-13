@@ -16,7 +16,7 @@
 #include "Parameter/ParamStorage.h"
 #include "FBS/ParamStorageItem_generated.h"
 
-#include "esp_log.h"
+#include "Platform.h"
 
 namespace app {
 
@@ -155,7 +155,7 @@ can::Id Parameters::ApplyPushedParameter(std::span<const uint8_t> sBlob)
 	// into the apply-buffer message before handing the bytes over.
 	const parameter::fbs::ParamItem* pItem = parameter::fbs::GetParamItem(sBlob.data());
 	if(pItem == nullptr) {
-		ESP_LOGW(TAG, "pushed buffer is not a ParamItem");
+		APP_LOGW(TAG, "pushed buffer is not a ParamItem");
 		return can::Id::Invalid;
 	}
 
@@ -164,7 +164,7 @@ can::Id Parameters::ApplyPushedParameter(std::span<const uint8_t> sBlob)
 	if(pP == nullptr) {
 		// A tool pushing a whole panel will name parameters we do not show.
 		// That is not an error, it is just not ours.
-		ESP_LOGI(
+		APP_LOGI(
 			TAG, "pushed parameter for id %u, which this unit does not hold", static_cast<unsigned>(pItem->can_id())
 		);
 		return can::Id::Invalid;
@@ -173,7 +173,7 @@ can::Id Parameters::ApplyPushedParameter(std::span<const uint8_t> sBlob)
 	parameter::ParamStorage::ApplyTo(pP, pItem);
 	SetIfDirty(true);
 
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"parameter %u updated from the bus: %d bands, tc %.0f ms",
 		static_cast<unsigned>(pItem->can_id()),

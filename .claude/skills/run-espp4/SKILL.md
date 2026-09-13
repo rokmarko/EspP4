@@ -1,19 +1,28 @@
 ---
 name: run-espp4
-description: Build, flash, run, drive and screenshot the ESP32-P4 LVGL + ThorVG demo firmware on the Waveshare ESP32-P4-WIFI6-Touch-LCD-4C board. Use when asked to run, start, build, flash, smoke-test, screenshot, or check the display/UI of this project.
+description: Build, flash, run, drive and screenshot the ESP32-P4 LVGL + ThorVG firmware -- on the Waveshare ESP32-P4-WIFI6-Touch-LCD-4C board, or in the desktop simulator with --sim. Use when asked to run, start, build, flash, smoke-test, screenshot, or check the display/UI of this project.
 ---
 
 # Run the ESP32-P4 LVGL + ThorVG demo
 
 Firmware for a Waveshare ESP32-P4-WIFI6-Touch-LCD-4C (720×720 round MIPI-DSI
-panel). It cannot run in this container — it runs on the board, over
-`/dev/ttyACM0`.
+panel), which runs on the board over `/dev/ttyACM0` — **and the same firmware
+as a desktop simulator**, which runs right here in an SDL window.
 
-**Drive it with `.claude/skills/run-espp4/driver.py`.** The firmware carries a
-one-character debug console on USB-Serial/JTAG
-([main/SerialConsole.cpp](../../../main/SerialConsole.cpp)); the driver speaks
-that protocol, including pulling a real screenshot off the panel and decoding it
-to PNG. All paths below are relative to the project root.
+**Drive either with `.claude/skills/run-espp4/driver.py`.** Both carry the same
+one-character debug console
+([src/SerialConsole.cpp](../../../src/SerialConsole.cpp)) — USB-Serial/JTAG on
+the board, stdin/stdout in the simulator — and the driver speaks that protocol,
+including pulling a real screenshot and decoding it to PNG. Add `--sim` to any
+command to drive the simulator instead of the board. All paths below are
+relative to the project root.
+
+**Reach for `--sim` first** when the question is about the UI, the scales, the
+model or the CAN stack: it needs no board, comes up in a second, and the
+screenshot is the same code path. Reach for the board when the question is
+about the panel, the touch controller, timing or memory — the simulator
+reports its heap figures as zero and its frame times are a tenth of the
+board's.
 
 ## Prerequisites
 
@@ -37,6 +46,10 @@ The driver needs `pyserial`, which lives in the IDF virtualenv — it re-execs
 itself there automatically, so serial commands work from a plain `python3` with
 no `source export.sh`.
 
+**The simulator needs none of the IDF.** It wants `libsdl2-dev`, the same
+`lv_font_conv`, a C++23 compiler and a display to open its window on. Build it
+with `--sim build`, which configures `port/pc` into `build-sim/` and builds it.
+
 ## Run (agent path)
 
 Every subcommand below was run against real hardware.
@@ -51,6 +64,21 @@ python3 .claude/skills/run-espp4/driver.py shot --scene scale   --out scale.png
 python3 .claude/skills/run-espp4/driver.py shot --scene altimeter --full --out alt.png
 python3 .claude/skills/run-espp4/driver.py shot --scene rpm       --out rpm.png
 ```
+
+The same, in the simulator — every subcommand takes `--sim`, and each one
+starts the simulator, drives it and stops it again:
+
+```bash
+python3 .claude/skills/run-espp4/driver.py --sim build    # cmake -S port/pc -B build-sim
+python3 .claude/skills/run-espp4/driver.py --sim smoke
+python3 .claude/skills/run-espp4/driver.py --sim shot --scene rpm --out rpm.png
+```
+
+Two `--sim`-only switches: `--can /dev/ttyUSB0` points it at a real Kanardia
+CANU adapter (without one the port falls back to self-test), and
+`--state DIR` puts the stored options and parameters somewhere known, which is
+how you start a run from a clean store or check that one survived a restart.
+`flash` is the one command that has no meaning with `--sim`.
 
 `smoke` resets the board, checks five boot markers, fails on any panic marker,
 then proves the UI is live by reading stats:
@@ -67,14 +95,35 @@ then proves the UI is live by reading stats:
 SMOKE PASSED
 ```
 
-The `rpm`/`eng`/`moving`/`model_stack` fields come from the shared Kanardia
-flight model (`main/AppModel.cpp`), and are how you check that its 50 ms
-processing loop is actually ticking. `model_stack` is the model task's smallest
-free stack in bytes -- internal RAM is the scarce resource here, so watch it.
+With `--sim` it checks a list of its own -- there is no panel driver and no
+touch controller to look for, but there is a scene, a CAN port and a model
+loop:
 
-The `can_*` fields cover the CAN side. The board has no transceiver, so the port
-runs in self-test (`can=self-test`): frames are looped back inside the
-controller, which still exercises decode, NOD store and the unit container.
+```
+[ok] main reached             (panel 720x720)
+[ok] scene built              (canvas 400x400 ARGB8888 ready)
+[ok] CAN port                 (CAN up:)
+[ok] model loop               (model loop running)
+[ok] debug console            (<<<CONSOLE ready>>>)
+[ok] stats: <<<STATS scene=gauge frame_ms=1.5 heap_int=0 ... can=self-test ... nvs=open nvs_opt=4 nvs_used=5/5 ...>>>
+[ok] ThorVG frame time 1.5 ms
+
+SMOKE PASSED
+```
+
+The `rpm`/`eng`/`moving`/`model_stack` fields come from the shared Kanardia
+flight model (`src/AppModel.cpp`), and are how you check that its 50 ms
+processing loop is actually ticking. `model_stack` is the model task's smallest
+free stack in bytes -- internal RAM is the scarce resource on the board, so
+watch it there. **In the simulator every memory figure is zero**, including
+`model_stack`: a desktop has none of those limits and the numbers would mean
+nothing.
+
+The `can_*` fields cover the CAN side. With nothing to talk to -- no
+transceiver wired on the board, no CANU adapter plugged into the desktop -- the
+port runs in self-test (`can=self-test`): frames are looped back, inside the
+controller on the board and through a queue and the receive thread in the
+simulator, which still exercises decode, NOD store and the unit container.
 `can_rx` should track `can_tx`; `can_nod` is a little lower because the
 sign-of-life and module-info frames are services, not NOD. `can_alive` counts
 units heard from, `can_ident` counts those that answered the module-information
@@ -82,20 +131,23 @@ request -- the latter stays 0 here, because this board implements only the
 asking half of that service.
 
 The `nvs_*` fields cover the option store. `nvs_opt` is how many option blobs
-came back out of NVS at boot: **0 only on the first boot after the `settings`
-partition is erased** (the defaults are written then), 4 on every boot after
-that. `nvs_used` is NVS entries used of the partition's capacity — 34 covers the four
-option blobs plus the single packed parameter blob. `w` forces
+came back at boot: **0 only on the first run against an empty store** (the
+defaults are written then), 4 every time after that. `nvs_used` is entries used
+of the store's capacity — 34 covers the four option blobs plus the single packed
+parameter blob on the board; the simulator has no fixed capacity and reports
+its file count twice (`5/5`). `w` forces
 the whole set out and prints `<<<SAVE>>>`; reboot afterwards and check
 `nvs_opt` to prove a round trip.
 
 `P` exercises the whole parameter-transfer path over the self-test loopback,
 both halves: it pushes one packed parameter through `OldServices` exactly as
 Nesis does — a DDS_BUFFER download, then the MCS_APPLY_BUFFER_DATA that commits
-it — and receives it back through DDS_B and MCS_B. The board applies it, saves the
-container to NVS and refreshes the scale bands — so the tachometer's green band
+it — and receives it back through DDS_B and MCS_B. It is applied, the container
+is saved and the scale bands refreshed — so the tachometer's green band
 moves from 2500 to 2200 rpm and **stays there across a reboot**. `can_push` in
-`<<<STATS>>>` counts accepted pushes since boot. Watch for these in the log:
+`<<<STATS>>>` counts accepted pushes since boot. It works in the simulator
+too, which is the cheapest way to exercise that path. Watch for these in the
+log:
 
 ```
 canproc: pushing 368 bytes to node 22 in 92 messages    <- DDS_A offered it
@@ -126,7 +178,7 @@ Single bytes, no newline. Useful if you talk to the port directly:
 |---|---|
 | `h` | `<<<HELP ...>>>` |
 | `i` | `<<<STATS scene=… frame_ms=… heap_int=… heap_psram=… rpm=… eng=… moving=… model_stack=… can_*=… nvs=… nvs_opt=… nvs_used=…>>>` |
-| `w` | write the option blobs to NVS, then `<<<SAVE ok=… written=… used=…>>>` |
+| `w` | write the option blobs to the settings store, then `<<<SAVE ok=… written=… used=…>>>` |
 | `P` | push a parameter at ourselves over CAN, then `<<<PUSH ok=… pushes=…>>>` |
 | `t` | toggle scene, as a screen tap would |
 | `s` | screenshot, every 2nd pixel (360×360, ~1.8 s) |
@@ -148,7 +200,8 @@ the same time.
 
 ## Gotchas
 
-Every one of these cost real debugging time.
+Every one of these cost real debugging time. The first four are the board's;
+the simulator's own are listed after them.
 
 - **Opening the port resets the chip.** USB-Serial/JTAG uses DTR/RTS for reset,
   and pyserial asserts them on open. So *no board state survives between driver
@@ -184,6 +237,27 @@ Every one of these cost real debugging time.
 - **PIL is in the system python but not the IDF venv.** The driver writes PNGs
   with `zlib` + `struct` so it needs neither.
 
+Simulator-only:
+
+- **The console owns stdout and nothing else may write to it.** Common's
+  `PRINTF` goes to `printf` off the board, and one such line inside a base64
+  body corrupts the image exactly as a log line does on the board.
+  `ConsoleOpen()` keeps the original stdout for the protocol and points the
+  stdout descriptor at stderr, so the log and the protocol cannot meet.
+- **The log is on stderr, so `smoke` has to read both streams.** `SimLink`
+  drains stderr on a thread of its own; it uses `read1()`, because a
+  `BufferedReader`'s `read(n)` would hold the whole boot log back until the
+  process exits.
+- **`<<<CONSOLE ready>>>` ends in `>>>`, which is the marker a stats request
+  waits for.** On the board the open-induced reset and the settle wait swallow
+  the banner; in the simulator `SimLink` drains it explicitly after starting
+  up, or the next command answers with the banner instead of its own reply.
+- **It needs a real display.** `SDL_VIDEODRIVER=dummy` does not get as far as a
+  window, so a headless session cannot run it.
+- **It does not reset between invocations.** Each `--sim` command starts a
+  fresh process, so state does not carry over -- but the settings store does,
+  and it is shared with every other run unless `--state` points somewhere else.
+
 ## Performance and headroom (measured, not estimated)
 
 - **Per ThorVG frame: gauge ~60 ms, rpm ~58 ms, ias ~38 ms, scale ~34 ms, altimeter ~28 ms.**
@@ -201,6 +275,10 @@ Every one of these cost real debugging time.
 - **`stats` cannot report another scene's frame time.** Opening the port resets
   the chip, so a bare `stats` always reports the default scene. Read a scene's
   frame time off the panel in a `shot --scene <name>` instead.
+- **The simulator's frame times are not the board's** and must never be quoted
+  as if they were: the gauge that costs ~60 ms on the panel costs ~1.5 ms on a
+  desktop. What the simulator does prove is that a scene draws, and what it
+  draws.
 
 ## Troubleshooting
 
@@ -218,3 +296,7 @@ Every one of these cost real debugging time.
 | `apply-buffer CRC mismatch` after a push | Frames were dropped between the download and the commit. The RX queue is 32 deep; `Pump()` bounds its burst to keep the receive thread ahead. |
 | `push to node N failed: <state>` | DDS_A's own state machine gave up — the text is `DDS_A::GetStateText()`, so it names the step (no confirm, timeout, node B busy, CRC). |
 | `smoke` fails on `scene built` | Canvas allocation failed — check PSRAM came up at 200 MHz in the boot log. |
+| `--sim`: `build-sim/espp4-sim not built` | Run `driver.py --sim build` first. |
+| `--sim`: `could not open a 720x720 SDL window` | No display, or SDL cannot reach it. The simulator is a real window; it will not run headless. |
+| `--sim`: `no CANU adapter on '/dev/ttyUSB0'` | Not an error — the port falls back to self-test. Pass `--can` to name a real adapter. |
+| `--sim`: stats answer with the banner instead of a stats line | Something consumed the console before `SimLink` drained it; the banner ends in `>>>`, which is the stats marker. |

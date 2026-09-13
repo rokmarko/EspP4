@@ -19,8 +19,13 @@ The four instrument scenes are drawn from the shared Kanardia `Public/Common`
 code and read their values from a `parameter::ParameterContainer`. A live `ms/frame` readout
 shows what one ThorVG frame actually costs.
 
+It is built twice from one set of sources: as firmware for the board, and as a
+**desktop simulator** that puts the same UI in an SDL window. See
+[Two builds](#two-builds).
+
 **Status:** running on hardware. Boot, panel, touch, all four scenes, the model
 loop and screenshot capture verified on a rev v1.3 board over `/dev/ttyACM0`.
+The simulator runs the same scenes, model, CAN stack and console on a desktop.
 
 ---
 
@@ -44,6 +49,43 @@ The demo draws into an **ARGB8888 `lvgl::Canvas`**. That format matters:
 `lv_draw_sw_vector` renders straight into an ARGB8888/XRGB8888 buffer, but for
 any other format (such as the panel's RGB565) it allocates a temporary
 full-area ARGB8888 buffer and blends back — every frame.
+
+## Two builds
+
+`src/` is the product and names no operating system. Everything that only a
+machine can answer goes through `src/Platform.h` -- logging, time, the LVGL
+lock, threads, the host link, heap figures -- plus three interfaces with a
+lifetime of their own: `app::CanPort`, `app::BlobStore` and
+`platform::FirmwareTarget`.
+
+| | board (`port/esp/`) | simulator (`port/pc/`) |
+|---|---|---|
+| display | Waveshare BSP, MIPI-DSI panel | LVGL's SDL driver, a 720×720 window |
+| input | GT911 touch | the mouse |
+| CAN | the P4's TWAI controller | `can::CanuCan` on a Kanardia CANU adapter |
+| no bus | self-test: RX mapped onto TX, NO_ACK | self-test: a queue and the receive thread |
+| settings | one NVS entry per key, `settings` partition | one file per key under `$XDG_STATE_HOME/espp4-sim` |
+| firmware update | ESP-IDF OTA into the spare app slot | a file next to the settings |
+| console | USB-Serial/JTAG | stdin/stdout |
+| threads | FreeRTOS tasks, sized stacks | `std::thread` |
+| build | `idf.py build` (`main/CMakeLists.txt`) | `cmake -S port/pc -B build-sim` |
+
+The simulator is not a mock: the scenes, the ThorVG rasteriser, the
+`avio::ModelBase` flight model, the CANaerospace stack and the debug console are
+the same code. What it cannot tell you is anything about the panel, the touch
+controller, timing or memory -- it reports its heap figures as zero, and a gauge
+frame that costs ~60 ms on the board costs ~1.5 ms on a desktop.
+
+```bash
+sudo apt install libsdl2-dev
+cmake -S port/pc -B build-sim -G Ninja
+cmake --build build-sim
+./build-sim/espp4-sim --can /dev/ttyUSB0        # both switches optional
+```
+
+LVGL and `lvgl_cpp` come out of `managed_components/` when it is there -- the
+very sources the board builds -- and are fetched at the pinned versions when it
+is not.
 
 ## Code style
 
@@ -83,7 +125,7 @@ idf.py -p /dev/ttyACM0 flash monitor
 ## Driving it from a host
 
 The firmware has a one-character debug console on USB-Serial/JTAG
-([main/SerialConsole.cpp](main/SerialConsole.cpp)) so the board can be smoke-tested
+([src/SerialConsole.cpp](src/SerialConsole.cpp)) so the board can be smoke-tested
 and screenshotted without looking at the panel:
 
 ```bash
@@ -110,7 +152,7 @@ console out.
 
 The frame time is software rasterisation of a 400x400 ARGB8888 canvas on a
 360 MHz core. If you need it faster, shrink `CANVAS_SIZE` in
-[main/VectorScene.cpp](main/VectorScene.cpp) -- cost scales with area.
+[src/VectorScene.cpp](src/VectorScene.cpp) -- cost scales with area.
 
 ---
 
@@ -124,7 +166,7 @@ and never gives it back, and three things on this board each need a *contiguous*
 list into PSRAM, but only part of the cost follows: mounting still takes ~12 kB
 at 24 kB of partition and ~40 kB at 184 kB. Without that option a 184 kB
 `settings` partition left too little and the board aborted at boot with
-`pthread: Failed to create task`. `Main.cpp` also starts the console before the
+`pthread: Failed to create task`. `app::Startup()` also starts the console before the
 model loop so the big stacks are taken while the heap is still clean.
 [partitions.csv](partitions.csv) carries the measurements.
 
@@ -158,7 +200,7 @@ after editing `sdkconfig.defaults` — unknown symbols fail quietly.
 * `CONFIG_LV_DRAW_THREAD_STACK_SIZE=32768` — LVGL's own note says 32 kB+ when ThorVG is on.
 * `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384` — with `LV_DRAW_SW_DRAW_UNIT_CNT > 1`,
   ThorVG compiles in its own `std::thread` worker pool; the 3 kB pthread default overflows.
-* `cfg.lv_adapter_cfg.task_stack_size = 32 kB` in `Main.cpp` — the canvas is
+* `cfg.lv_adapter_cfg.task_stack_size = 32 kB` in `port/esp/MainEsp.cpp` — the canvas is
   rasterised from the LVGL task.
 
 If you hit a stack overflow anyway, set `CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1`: that
@@ -180,7 +222,7 @@ turns on ThorVG's SVG and Lottie loaders and grows the binary noticeably.
 **Touch.** Waveshare's own notes on BSP 3.0.1 say touch RST/INT are left
 unconfigured, the driver probes `0x5D` then `0x14`, and it polls rather than using
 an ISR. If the tap-to-switch does not respond, that is the first thing to check;
-`cfg.touch_flags` in `Main.cpp` is where you would flip axes.
+`cfg.touch_flags` in `port/esp/MainEsp.cpp` is where you would flip axes.
 
 **One escape hatch to the C API.** `lvgl_cpp`'s `set_stroke_dash()` ignores an
 empty vector, so it cannot clear a dash pattern. `DrawGauge()` calls
@@ -192,27 +234,47 @@ is the binding's supported way down to the C layer.
 ## Layout
 
 ```
-.claude/skills/run-espp4/  run skill: SKILL.md + driver.py
-CMakeLists.txt           project definition
+.claude/skills/run-espp4/  run skill: SKILL.md + driver.py (board and --sim)
+CMakeLists.txt           ESP-IDF project definition
 partitions.csv           2 x 4 MB OTA app slots + 24 kB settings NVS, on 16 MB flash
 sdkconfig.defaults       target, PSRAM, LVGL, ThorVG and lvgl_cpp configuration
-main/
-  Main.cpp               starts the BSP display, installs the unit formatter,
-                         hands over to the scene
+cmake/
+  KanardiaSources.cmake  the source lists both builds compile
+  KanardiaFonts.cmake    lv_font_conv: Kanardia 14/16/20/28 + KanardiaFont.h
+src/                     the product -- no operating system named anywhere in here
+  App.h/.cpp             the boot both builds share, once a display exists
+  Platform.h             what the application asks of the machine underneath it
+  CanPort.h              the CAN port as the application sees it
+  BlobStore.h            where a packed option or parameter blob is kept
   AppModel.h/.cpp        concrete avio::ModelBase + its 50 ms processing task
   VectorScene.h/.cpp     the LVGL UI and all ThorVG drawing
-  ScaleDrawTvg.h/.cpp    the Kanardia scale on ThorVG; twin of ScaleDrawQt
-  CanPortEsp.h/.cpp      can::AbstractCanPort on the P4's TWAI controller
+  Painter.h              the drawing back end the scale is written against
+  PainterTvg.h/.cpp      that concept on ThorVG/LVGL; PainterQt.h is the Qt twin
+  ScaleDraw.h/.cpp       the Kanardia scale, drawn once, against either back end
   CanProcessor.h/.cpp    CANaerospace decode: NOD, units, pushed-parameter receive
   ApplicationDefines.h   our CAN node id and the services we implement
   AppOptions.h/.cpp      the option set we keep, and the keys Settings walks
   AppParameters.h/.cpp   parameter::ParameterContainer, fed from the NOD
-  StorageOptions.h/.cpp  option and parameter blobs in the `settings` NVS partition
-  KanardiaCommon.h       Qt shim so Public/Common compiles for this target
-  (build/fonts/)         lv_font_conv output: Kanardia 14/16/20/28 + KanardiaFont.h
+  StorageOptions.h/.cpp  the options and the parameter blob, over a BlobStore
   SerialConsole.h/.cpp   debug console: stats, scene toggle, save settings, screenshot
+  KanardiaCommon.h       Qt shim so Public/Common compiles for both targets
+port/esp/                the board
+  MainEsp.cpp            starts the BSP display, hands over to app::Startup()
+  PlatformEsp.cpp        ESP-IDF and the BSP behind Platform.h
+  CanPortEsp.h/.cpp      app::CanPort on the P4's TWAI controller
+  BlobStoreNvs.cpp       app::BlobStore on the `settings` NVS partition
+  FirmwareEsp.cpp        platform::FirmwareTarget on ESP-IDF's OTA API
+port/pc/                 the desktop simulator
+  CMakeLists.txt         the simulator's own build; needs no ESP-IDF
+  lv_conf.h              LVGL's template with eleven values changed
+  MainSim.cpp            opens the SDL window, then app::Startup(), then LVGL's loop
+  PlatformSim.cpp        POSIX and the standard library behind Platform.h
+  CanPortCanu.h/.cpp     app::CanPort on can::CanuCan, with a software loopback
+  BlobStoreFile.cpp      app::BlobStore on a directory of files
+  FirmwarePc.cpp         platform::FirmwareTarget on a file
+main/
+  CMakeLists.txt         the ESP-IDF component: src/ + port/esp/ + Common + fonts
   idf_component.yml      BSP + LVGL + lvgl_cpp dependencies
-  CMakeLists.txt         Public/Common sources, font generation, RapidJSON workarounds
 ```
 
 ## References

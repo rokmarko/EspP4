@@ -1,22 +1,25 @@
 ---
 name: kanardia-style
-description: Kanardia house style for this project's own C++ in main/ - the copyright banner, #pragma once, plain // comments with no doxygen, and clang-format-20 against the repo's .clang-format. Use when creating a new .h/.cpp, when formatting or reformatting code, when pasting code in from another Kanardia tree, or before committing.
+description: Kanardia house style for this project's own C++ in src/ and port/ - the copyright banner, #pragma once, plain // comments with no doxygen, and clang-format-20 against the repo's .clang-format. Use when creating a new .h/.cpp, when formatting or reformatting code, when pasting code in from another Kanardia tree, or before committing.
 ---
 
 # Kanardia house style
 
-Applies to **`main/` only** -- this project's own code. `managed_components/`
-and the shared `Public/Common` tree under `$HOME/Branch/v4_3` carry their own
-style and must be left exactly as they are.
+Applies to **`src/` and `port/` only** -- this project's own code.
+`managed_components/`, the shared `Public/Common` tree under `$HOME/Branch/v4_3`
+and `port/pc/lv_conf.h` (LVGL's own template with a few values changed) carry
+their own style and must be left exactly as they are. The script knows about
+all three and refuses or skips them.
 
 Everything below is enforced by one script, so do not do it by hand:
 
 ```bash
 python3 .claude/skills/kanardia-style/style.py check          # report, change nothing
-python3 .claude/skills/kanardia-style/style.py format         # fix main/*.cpp main/*.h
-python3 .claude/skills/kanardia-style/style.py format main/Foo.cpp   # or named files
-python3 .claude/skills/kanardia-style/style.py new Foo        # scaffold Foo.h + Foo.cpp
+python3 .claude/skills/kanardia-style/style.py format         # fix src/ and port/
+python3 .claude/skills/kanardia-style/style.py format src/Foo.cpp    # or named files
+python3 .claude/skills/kanardia-style/style.py new Foo        # scaffold src/Foo.h + .cpp
 python3 .claude/skills/kanardia-style/style.py new Foo -n scale      # in namespace scale
+python3 .claude/skills/kanardia-style/style.py new Foo -d port/pc    # in a port
 ```
 
 `check` exits non-zero when something is off, so it works as a pre-commit gate.
@@ -90,7 +93,8 @@ Both are handled by `style.py`; they matter if you ever reach for
 
 ## Adding a new source file
 
-`style.py new Foo` writes `main/Foo.h` and `main/Foo.cpp` already banded,
+`style.py new Foo` writes `src/Foo.h` and `src/Foo.cpp` already banded,
 guarded, formatted and in `namespace app`. It does **not** touch the build:
-add the `.cpp` to `SRCS` in `main/CMakeLists.txt` yourself, then
+add the `.cpp` to the right list in `cmake/KanardiaSources.cmake` (or, for a
+port-only file, to that port's own `CMakeLists.txt`) yourself, then
 `idf.py build`. See the run-espp4 skill for building and driving the board.

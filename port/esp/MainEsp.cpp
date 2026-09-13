@@ -10,47 +10,26 @@
  *                                                                         *
  ***************************************************************************/
 
-// LVGL 9 + ThorVG demo for the Waveshare ESP32-P4-WIFI6-Touch-LCD-4C.
+// The board's entry point.
 //
-// The board is a 4", 720x720 round IPS panel on 2-lane MIPI-DSI (JD9365) with a
-// GT911 capacitive touch controller. All of that is handled by the Waveshare
-// BSP component; this file only starts it and hands over to the scene.
+// The panel is 4", 720x720 round IPS on 2-lane MIPI-DSI (JD9365) with a GT911
+// capacitive touch controller. All of that is handled by the Waveshare BSP
+// component; this file only starts it and hands over to app::Startup(), which
+// is the half of the boot that the simulator shares.
 
 #include "KanardiaCommon.h"
+
+#include "App.h"
+#include "Platform.h"
 
 #include "bsp/display.h"
 #include "bsp/esp-bsp.h"
 
-#include "esp_heap_caps.h"
-#include "esp_log.h"
-
-#include "AppModel.h"
-#include "SerialConsole.h"
-#include "VectorScene.h"
-
-#include "Avio/Format/AvioFormat.h"
-#include "Unit/UnitFormatterUtf8.h"
-
-namespace {
-constexpr const char* TAG = "main";
-
-// Hand Common's formatting layer the formatter it works through.
-//
-// `avio::format` keeps one process-wide `unit::Formatter*` and asserts on it;
-// everything below -- ToString(), ToStringFromSystemUnit(), Formatter::
-// FormatAzimuth() -- reaches it from there, so no call site has to carry one.
-// The UTF-8 formatter is the one that maps a unit onto the private-use
-// codepoint the Kanardia font draws for it.
-void InstallUnitFormatter()
-{
-	static const unit::FormatterUtf8 formatter;
-	avio::format::SetUnitFormatter(&formatter);
-}
-} // namespace
+namespace { constexpr const char* TAG = "main"; } // namespace
 
 extern "C" void app_main(void)
 {
-	ESP_LOGI(TAG, "panel %dx%d, %d-lane MIPI-DSI", BSP_LCD_H_RES, BSP_LCD_V_RES, BSP_LCD_MIPI_DSI_LANE_NUM);
+	APP_LOGI(TAG, "panel %dx%d, %d-lane MIPI-DSI", BSP_LCD_H_RES, BSP_LCD_V_RES, BSP_LCD_MIPI_DSI_LANE_NUM);
 
 	// Zero-initialised, then filled in explicitly: ESP_LV_ADAPTER_DEFAULT_CONFIG()
 	// leaves the nested auto_sleep.callbacks member out and trips
@@ -68,48 +47,23 @@ extern "C" void app_main(void)
 	cfg.tear_avoid_mode						 = ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL;
 
 	if(bsp_display_start_with_config(&cfg) == nullptr) {
-		ESP_LOGE(TAG, "display init failed");
+		APP_LOGE(TAG, "display init failed");
 		return;
 	}
 
-	// Before anything formats a value -- the scene builds its labels below.
-	InstallUnitFormatter();
-
-	// Console first, then the model, then the scene.
-	//
-	// The console and the CAN thread each want a 32 kB *contiguous* stack out
-	// of internal RAM, and the model loop mounts the NVS settings partition on
-	// its way past -- so the big stacks are taken while the heap is still
-	// clean. The console failing is especially bad, since it is the only way
-	// to see anything from the host.
-	//
-	// The scene comes last because it reads its colour bands out of the
-	// parameter container, and that is only populated -- from its defaults and
-	// then from the stored blob -- once the model loop has run.
-	demo::StartSerialConsole();
-
-	if(!app::StartModelLoop()) {
-		ESP_LOGE(TAG, "model loop failed to start");
-	}
-
-	bsp_display_lock(UINT32_MAX);
-	const bool ok = demo::CreateScene();
-	bsp_display_unlock();
-
-	if(!ok) {
-		ESP_LOGE(TAG, "scene init failed");
+	if(app::Startup() == false)
 		return;
-	}
 
 	bsp_display_backlight_on();
 
 	// Largest block, not just the total: the 32 kB stacks above need it
 	// contiguous, and that is what runs out first.
-	ESP_LOGI(
+	const platform::HeapStats heap = platform::GetHeapStats();
+	APP_LOGI(
 		TAG,
 		"free heap: %u B internal (largest block %u B), %u B PSRAM",
-		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-		static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
-		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM))
+		static_cast<unsigned>(heap.uFreeInternal),
+		static_cast<unsigned>(heap.uLargestBlock),
+		static_cast<unsigned>(heap.uFreePsram)
 	);
 }

@@ -162,7 +162,7 @@ bool StartModelLoop();
 Model* GetModel();
 
 // The CAN port, or nullptr before StartModelLoop().
-class CanPortEsp* GetCanPort();
+class CanPort* GetCanPort();
 
 // The CANaerospace processor, or nullptr before StartModelLoop().
 class CanProcessor* GetCanProcessor();

@@ -14,8 +14,9 @@
 
 #include "AppModel.h"
 
-#include "CanPortEsp.h"
+#include "CanPort.h"
 #include "CanProcessor.h"
+#include "Platform.h"
 #include "StorageOptions.h"
 
 #include "CanAerospace/DownloadService.h"
@@ -24,14 +25,8 @@
 #include "CRC/CRC-16.h"
 #include "Parameter/ParamStorage.h"
 
+#include <cstdlib>
 #include <cstring>
-
-#include "esp_log.h"
-#include "esp_pthread.h"
-#include "esp_timer.h"
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,17 +44,11 @@ namespace {
 
 // ThorVG already wants a big stack; the model is far more modest, but Navigation
 // and SunriseSunset do real floating-point work, so do not go below 8 kB.
-	constexpr uint32_t	 TASK_STACK = 8 * 1024;
-	constexpr UBaseType_t TASK_PRIO	= 4;
+	constexpr uint32_t TASK_STACK = 8 * 1024;
+	constexpr int		 TASK_PRIO	= 4;
 
-// The CAN receive thread's stack -- see StartModelLoop(). It decodes frames and
-// never rasterises, so it does not need the 32 kB ThorVG's workers do, and it
-// cannot have it: 32 kB contiguous internal RAM is not there by the time the
-// port starts.
-	constexpr uint32_t CAN_STACK = 12 * 1024;
-
-	Model*		 g_pModel = nullptr;
-	TaskHandle_t g_hTask	 = nullptr;
+	Model*					g_pModel = nullptr;
+	platform::TaskHandle g_hTask	= nullptr;
 
 // How many option blobs came back out of NVS at boot. Reported by the console
 // so a stored-then-rebooted round trip can be checked from the host.
@@ -67,7 +56,7 @@ namespace {
 
 // The CAN half. Both are function-local statics created in
 // StartModelLoop() and only pointed at from here.
-	CanPortEsp*	  g_pPort = nullptr;
+	CanPort*		  g_pPort = nullptr;
 	CanProcessor* g_pProc = nullptr;
 
 // One CANaerospace normal-operation-data frame.
@@ -119,7 +108,7 @@ void Model::SaveLastKnownCoordinate()
 	m_options.m_lastKnown.SetCoordinate(m_lastKnownCoordinate.Get());
 
 	const uint32_t uWritten = GetSettings().Save(m_options);
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"last known coordinate saved (%u option blob%s written)",
 		static_cast<unsigned>(uWritten),
@@ -131,7 +120,7 @@ void Model::SaveLastKnownCoordinate()
 
 void Model::HandleNavigationChange(const avio::navigation::Action eAction, const uint32_t uActivateAxisCombo)
 {
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"navigation change: action=%d axes=0x%02x",
 		static_cast<int>(eAction),
@@ -144,7 +133,7 @@ void Model::HandleNavigationChange(const avio::navigation::Action eAction, const
 void Model::ActivateAutopilot(const uint32_t uAxisCombo, const avio::autopilot::Operation eOperation)
 {
 	// No autopilot on the bus; log so the call is visible while bringing up.
-	ESP_LOGI(TAG, "autopilot: axes=0x%02x op=%d", static_cast<unsigned>(uAxisCombo), static_cast<int>(eOperation));
+	APP_LOGI(TAG, "autopilot: axes=0x%02x op=%d", static_cast<unsigned>(uAxisCombo), static_cast<int>(eOperation));
 }
 
 // --------------------------------------------------------------------------
@@ -153,7 +142,7 @@ void Model::Simulate(float fSeconds)
 {
 	// Only in self-test, where the frames come back to us and reach no further.
 	// On a real bus these ids belong to somebody else.
-	if(g_pPort == nullptr || g_pProc == nullptr || g_pPort->GetMode() != CanPortEsp::Mode::SelfTest)
+	if(g_pPort == nullptr || g_pProc == nullptr || g_pPort->GetMode() != CanPort::Mode::SelfTest)
 		return;
 
 	// Stand in for the engine ECU: idle, then a slow sweep up through the green
@@ -183,7 +172,7 @@ void Model::Simulate(float fSeconds)
 
 bool Model::SimulateParameterPush()
 {
-	if(g_pPort == nullptr || g_pPort->GetMode() != CanPortEsp::Mode::SelfTest)
+	if(g_pPort == nullptr || g_pPort->GetMode() != CanPort::Mode::SelfTest)
 		return false;
 	if(g_pProc == nullptr)
 		return false;
@@ -220,7 +209,7 @@ bool Model::SimulateParameterPush()
 	// and PushBuffer() is UnitInfoBase::Download() against the same services.
 	const std::vector<uint8_t> vFB = parameter::ParamStorage::GetParameterFB(&param);
 	if(vFB.empty()) {
-		ESP_LOGE(TAG, "could not pack the parameter to push");
+		APP_LOGE(TAG, "could not pack the parameter to push");
 		return false;
 	}
 
@@ -248,7 +237,7 @@ void Model::SendSignOfLife()
 	// second copy of a layout Common already owns, and it did not match: the
 	// data-type byte was dtULong where ServiceHandler sends a zero.
 	g_pProc->PostSignOfLife();
-	ESP_LOGI(TAG, "sign-of-life sent, id=%u", static_cast<unsigned>(g_pProc->GetNodeId()));
+	APP_LOGI(TAG, "sign-of-life sent, id=%u", static_cast<unsigned>(g_pProc->GetNodeId()));
 }
 
 // --------------------------------------------------------------------------
@@ -280,17 +269,30 @@ namespace {
 
 	void ModelTask(void*)
 	{
-		const int64_t tStart = esp_timer_get_time();
-		TickType_t	  tWake	= xTaskGetTickCount();
+		const int64_t tStart = platform::Micros();
+	// The beat is kept against the clock rather than by sleeping TICK_MS at a
+	// time, so a slow tick is absorbed instead of accumulating. Falling more
+	// than one period behind resets the phase: catching up by running several
+	// Update50ms() back to back would be worse than losing one.
+		int64_t tNext = tStart;
+
 	// Primed so the one-second work runs on the very first tick: a unit that
 	// has just come up announces itself straight away, it does not wait.
 		uint32_t uTick = TICKS_PER_SEC - 1;
 
 		for(;;) {
-			vTaskDelayUntil(&tWake, pdMS_TO_TICKS(TICK_MS));
+			tNext += TICK_MS * 1000;
+			const int64_t tNow = platform::Micros();
+			if(tNext > tNow)
+				platform::SleepMs(static_cast<uint32_t>((tNext - tNow) / 1000));
+			else
+				tNext = tNow;
 
-		// const float fSeconds = static_cast<float>(esp_timer_get_time() - tStart) / 1e6f;
-		// g_pModel->Simulate(fSeconds);
+		// Stand in for the traffic a real bus would carry. Does nothing unless
+		// the port is in self-test, which is the only mode where these frames
+		// reach no further than ourselves -- so this is a no-op on the board's
+		// default configuration and what makes the simulator move.
+			g_pModel->Simulate(static_cast<float>(tNow - tStart) / 1e6f);
 
 			g_pModel->Update50ms();
 
@@ -322,53 +324,40 @@ bool StartModelLoop()
 
 	// CAN first, so the port exists before the first Simulate() call.
 	//
-	// Self-test by default: this board carries no transceiver, and in that mode
-	// the controller takes its own frames back, which exercises port ->
-	// processor -> NOD -> model for real. Wire a transceiver to the pins and
-	// switch to Mode::Normal to sit on an actual bus.
-	CanPortEsp::Config cfg;
-	// cfg.eMode = CanPortEsp::Mode::SelfTest;
+	// Which port that is, and what a mode means on it, is the build's business
+	// -- the TWAI controller on the board, a CANU adapter in the simulator.
+	// Both answer Mode::SelfTest the same way: frames sent come straight back
+	// through port -> processor -> NOD -> model, which is what makes a unit
+	// with no bus in front of it worth running at all.
+	//
+	// The default is Normal, which is what the board has wanted since it grew
+	// a transceiver. The simulator drops to self-test on its own when there is
+	// no adapter to open -- the usual state on a desk -- and it is in that
+	// mode that Simulate() has something to talk to.
+	CanPort::Config cfg;
+	// Ignored on the board, where the pins are fixed; the simulator reads it
+	// as the adapter's serial device and falls back to self-test without one.
+	cfg.pszDevice = std::getenv("ESPP4_CAN_DEVICE");
 
 	// The port hands every frame to the processor, which files it in the NOD
 	// the model is already reading.
-	static CanPortEsp port(
+	g_pPort = CreateCanPort(
 		[](const can::Message& msg) {
 			if(g_pProc)
 				g_pProc->Process(msg);
 		},
 		cfg
 	);
-	g_pPort = &port;
+	if(g_pPort == nullptr) {
+		APP_LOGE(TAG, "no CAN port; the NOD will stay empty");
+		return false;
+	}
 
-	static CanProcessor proc(model.GetNODStore(), port, Model::DEMO_SERIAL);
+	static CanProcessor proc(model.GetNODStore(), *g_pPort, Model::DEMO_SERIAL);
 	g_pProc = &proc;
 
-	// The receive thread gets its own, smaller stack.
-	//
-	// AbstractCanPort::StartLoopProcess() opens a std::jthread, so its stack
-	// comes from CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT -- 32 kB, which is
-	// sized for ThorVG's worker pool and its 16 kB on-stack Cell buffer. This
-	// thread only decodes frames, and asking for 32 kB of *contiguous*
-	// internal RAM here is what finally broke: after boot the largest free
-	// block is 31744 B, so pthread_create failed and std::thread called
-	// abort(). CAN_STACK is what the loop actually needs, with room to spare.
-	//
-	// esp_pthread_set_cfg() is per-calling-task and not inherited, so this
-	// only reaches the thread Start() opens below -- ThorVG's workers are
-	// created from the LVGL task and keep the 32 kB default.
-	esp_pthread_cfg_t pthreadCfgPrev = esp_pthread_get_default_config();
-	esp_pthread_cfg_t pthreadCfg		= pthreadCfgPrev;
-	pthreadCfg.stack_size				= CAN_STACK;
-	pthreadCfg.thread_name				= "can_rx";
-	pthreadCfg.inherit_cfg				= false;
-	ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadCfg));
-
-	const bool bPortUp = port.Start();
-
-	ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadCfgPrev));
-
-	if(bPortUp == false) {
-		ESP_LOGE(TAG, "CAN port failed to start; the NOD will stay empty");
+	if(g_pPort->Start() == false) {
+		APP_LOGE(TAG, "CAN port failed to start; the NOD will stay empty");
 	}
 
 	// Settings after the CAN port and before the model task, on purpose.
@@ -388,10 +377,10 @@ bool StartModelLoop()
 		g_uOptionsLoaded = settings.Load(model.GetOptions());
 		if(g_uOptionsLoaded == 0) {
 			const uint32_t uWritten = settings.Save(model.GetOptions(), false);
-			ESP_LOGI(TAG, "no stored options; wrote %u defaults", static_cast<unsigned>(uWritten));
+			APP_LOGI(TAG, "no stored options; wrote %u defaults", static_cast<unsigned>(uWritten));
 		}
 		else {
-			ESP_LOGI(TAG, "%u option blobs loaded from NVS", static_cast<unsigned>(g_uOptionsLoaded));
+			APP_LOGI(TAG, "%u option blobs loaded from NVS", static_cast<unsigned>(g_uOptionsLoaded));
 		}
 		model.RestoreLastKnownCoordinate();
 
@@ -403,20 +392,21 @@ bool StartModelLoop()
 			settings.SaveParameters(model.GetParameters());
 	}
 	else {
-		ESP_LOGW(
+		APP_LOGW(
 			TAG,
 			"settings unavailable; options and parameters "
 			"stay at their defaults"
 		);
 	}
 
-	if(xTaskCreate(ModelTask, "model", TASK_STACK, nullptr, TASK_PRIO, &g_hTask) != pdPASS) {
-		ESP_LOGE(TAG, "could not create the model task");
+	const platform::TaskConfig taskCfg{"model", TASK_STACK, TASK_PRIO};
+	g_hTask = platform::StartTask(taskCfg, ModelTask, nullptr);
+	if(g_hTask == nullptr) {
 		g_pModel = nullptr;
 		return false;
 	}
 
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"model loop running: Update50ms every %u ms, Update1s every %u ms",
 		static_cast<unsigned>(TICK_MS),
@@ -434,7 +424,7 @@ Model* GetModel()
 
 // --------------------------------------------------------------------------
 
-CanPortEsp* GetCanPort()
+CanPort* GetCanPort()
 {
 	return g_pPort;
 }
@@ -465,7 +455,7 @@ can::Id ApplyPushedParameter()
 	// blob is one packed image, and a push that survives only until the next
 	// power cycle would be worse than useless.
 	if(GetSettings().SaveParameters(g_pModel->GetParameters()) == false)
-		ESP_LOGE(TAG, "pushed parameter applied but could not be saved");
+		APP_LOGE(TAG, "pushed parameter applied but could not be saved");
 
 	return eId;
 }
@@ -495,10 +485,7 @@ uint32_t OptionsLoaded()
 
 uint32_t ModelStackHeadroom()
 {
-	if(g_hTask == nullptr)
-		return 0;
-	// FreeRTOS reports the high water mark in words on this port.
-	return uxTaskGetStackHighWaterMark(g_hTask) * sizeof(StackType_t);
+	return platform::StackHeadroom(g_hTask);
 }
 
 } // namespace app

@@ -4,10 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-app ESP-IDF project: an LVGL 9 UI with ThorVG vector graphics, in C++,
-for the **Waveshare ESP32-P4-WIFI6-Touch-LCD-4C** (4", 720×720 round IPS,
-2-lane MIPI-DSI / JD9365, GT911 touch). There is no test suite and no linter —
-the compiler and the board are the feedback loop.
+An LVGL 9 UI with ThorVG vector graphics, in C++, for the **Waveshare
+ESP32-P4-WIFI6-Touch-LCD-4C** (4", 720×720 round IPS, 2-lane MIPI-DSI / JD9365,
+GT911 touch). There is no test suite and no linter — the compiler and the board
+are the feedback loop.
+
+**It is built twice**, from one set of sources:
+
+```
+src/          the product. Knows nothing about ESP-IDF, FreeRTOS, SDL or POSIX.
+port/esp/     what only the board can answer: the BSP panel, the TWAI
+              controller, NVS, the OTA slots. Built by main/CMakeLists.txt,
+              which is the ESP-IDF component and nothing else.
+port/pc/      the same answers on a desktop: an SDL window, can::CanuCan on a
+              CANU adapter, a directory of files, a firmware image on disk.
+              Built by port/pc/CMakeLists.txt, a plain CMake project.
+cmake/        the source lists and the font generation both builds share.
+```
+
+`src/Platform.h` is the seam -- logging, time, the LVGL lock, threads, the host
+link, heap figures -- plus three interfaces with a lifetime of their own:
+`app::CanPort` (src/CanPort.h), `app::BlobStore` (src/BlobStore.h) and
+`platform::FirmwareTarget`. Each port supplies one implementation of each.
+
+The simulator is not a mock. It runs the real scenes through the real ThorVG,
+the real `avio::ModelBase`, the real CANaerospace stack and the same
+one-character console, so anything that is not the panel, the controller or the
+flash can be developed and screenshotted without a board on the desk.
 
 ## Commands
 
@@ -31,13 +54,37 @@ python3 .claude/skills/run-espp4/driver.py smoke
 python3 .claude/skills/run-espp4/driver.py shot --scene gauge --out gauge.png
 ```
 
+**The simulator needs none of the IDF environment.** It is a plain CMake
+project; it wants `libsdl2-dev` and the same `lv_font_conv`:
+
+```bash
+cmake -S port/pc -B build-sim -G Ninja
+cmake --build build-sim
+./build-sim/espp4-sim                       # --can /dev/ttyUSB0, --state DIR
+```
+
+The run skill drives it through the same console, with `--sim`:
+
+```bash
+python3 .claude/skills/run-espp4/driver.py --sim build
+python3 .claude/skills/run-espp4/driver.py --sim smoke
+python3 .claude/skills/run-espp4/driver.py --sim shot --scene rpm --out rpm.png
+```
+
+LVGL and `lvgl_cpp` come from `managed_components/`, so the simulator compiles
+the very sources the board does. That directory is resolved by the IDF
+component manager and is not tracked; in a checkout that has never run
+`idf.py reconfigure`, the simulator's CMake fetches both at the pinned
+versions instead.
+
 Formatting and new source files go through the kanardia-style skill, which
 needs `clang-format-20` (`sudo apt install clang-format-20`):
 
 ```bash
 python3 .claude/skills/kanardia-style/style.py check    # non-zero if anything is off
 python3 .claude/skills/kanardia-style/style.py format
-python3 .claude/skills/kanardia-style/style.py new Foo  # banded Foo.h + Foo.cpp
+python3 .claude/skills/kanardia-style/style.py new Foo  # banded src/Foo.h + src/Foo.cpp
+python3 .claude/skills/kanardia-style/style.py new Foo -d port/pc   # or in a port
 ```
 
 ```bash
@@ -62,18 +109,24 @@ rm -f sdkconfig && idf.py build
 grep -E "^CONFIG_(SPIRAM_SPEED|LV_USE_THORVG|LV_DRAW)" sdkconfig
 ```
 
-## Driving the board
+## Driving the board, or the simulator
 
-The firmware carries a one-character debug console on USB-Serial/JTAG
-(`main/SerialConsole.cpp`): `i` stats (scene, frame time, heap, the model's
+The firmware carries a one-character debug console -- USB-Serial/JTAG on the
+board, stdin/stdout in the simulator, the same protocol on both
+(`src/SerialConsole.cpp`): `i` stats (scene, frame time, heap, the model's
 rpm/eng/moving/stack, the CAN counters, the NVS entry count and the internal
 heap low-water mark), `t` toggle scene, `w` write the option blobs to NVS,
 `P` push a parameter at ourselves over CAN, `s`/`S` screenshot as base64
 RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
-`driver.py`, which is how you smoke-test the board or get a PNG of the panel
-without looking at it. Read that SKILL.md before touching serial or snapshots --
-it lists the traps (port-open resets the chip, logs corrupt the base64 stream,
-LVGL's RGB888 is B,G,R).
+`driver.py`, which is how you smoke-test either build or get a PNG of the panel
+without looking at it -- `--sim` picks the simulator. Read that SKILL.md before
+touching serial or snapshots -- it lists the traps (port-open resets the chip,
+logs corrupt the base64 stream, LVGL's RGB888 is B,G,R).
+
+In the simulator the console is on stdout and the log on stderr, so the two
+cannot corrupt each other; `ConsoleOpen()` takes the original stdout for itself
+and points the descriptor at stderr, because Common's `PRINTF` goes to `printf`
+off the board and would otherwise land in the middle of a base64 body.
 
 Measured on hardware, per scene: **gauge ~60 ms, rpm ~58 ms, ias ~38 ms,
 scale ~34 ms, altimeter ~28 ms** per ThorVG frame, against a 33 ms timer -- so the UI runs at
@@ -86,12 +139,19 @@ it is only sampling noise. That is the tightest resource in the project; the
 model task's own stack headroom is `model_stack=`, and app_main logs the
 largest block at boot.
 
+**The simulator reports all four heap figures as zero and `model_stack=0`**, on
+purpose: a desktop has none of those limits and inventing numbers for them
+would invite comparisons that mean nothing. Its frame times are real but are
+not the board's -- the same gauge that costs 60 ms on the panel costs about
+1.5 ms here, so the simulator says nothing about whether a scene will hit the
+33 ms timer.
+
 ## Architecture
 
 Three layers, each of which has bitten this project at least once:
 
-**BSP → LVGL.** `Main.cpp` does nothing but build a `bsp_display_cfg_t` and call
-`bsp_display_start_with_config()`. The Waveshare BSP brings up the DSI panel,
+**BSP → LVGL.** `port/esp/MainEsp.cpp` does nothing but build a
+`bsp_display_cfg_t` and call `bsp_display_start_with_config()`. The Waveshare BSP brings up the DSI panel,
 GT911 touch and `espressif/esp_lvgl_adapter`, which owns the LVGL task and the
 tear-avoidance frame buffers. Everything after that runs under the LVGL lock:
 `bsp_display_lock()` / `bsp_display_unlock()`.
@@ -107,12 +167,13 @@ registry) wraps LVGL as `lvgl::Canvas`, `lvgl::Label`, `lvgl::Timer`,
 against the binding; `dsc.raw()` is the supported escape hatch to the C layer
 where the binding has a gap.
 
-**Kanardia Common → the scale.** `main/CMakeLists.txt` compiles a hand-picked
-subset of the shared `Public/Common` tree (parameter bands, units, scale utils)
-straight out of the working copy at `$ENV{HOME}/Branch/v4_3`, exactly the way
-`Private/Horis/v1/CMakeLists.txt` does. Override the location with
-`idf.py -DKANARDIA_BRANCH=/path/to/v4_3 build`; the build fails loudly if the
-tree is missing. `ScaleDrawTvg.cpp` is the ThorVG twin of
+**Kanardia Common → the scale.** `cmake/KanardiaSources.cmake` lists a
+hand-picked subset of the shared `Public/Common` tree (parameter bands, units,
+scale utils) straight out of the working copy at `$ENV{HOME}/Branch/v4_3`,
+exactly the way `Private/Horis/v1/CMakeLists.txt` does, and both builds compile
+that one list. Override the location with `-DKANARDIA_BRANCH=/path/to/v4_3`;
+the build fails loudly if the tree is missing. `ScaleDraw.cpp` against
+`PainterTvg` is the ThorVG twin of
 `Common/Scale/ScaleDrawQt.cpp` — same structure, same style structs, LVGL vector
 paths instead of a QPainter. Two things to know before touching it:
 
@@ -126,19 +187,21 @@ paths instead of a QPainter. Two things to know before touching it:
 - **`int32_t` is `long` here, and that breaks two things.** `Map/MapBase.h` does
   `assert(common::IsInside(iLon, -180, 179))`; `IsInside` deduces one `T` from
   all three arguments, so `long` against `int` fails to deduce and the header
-  will not compile. `KanardiaCommon.h` adds a constrained mixed-type overload,
-  and `main/CMakeLists.txt` force-includes it into every Common source with
-  `-include`. The same mismatch turns Common's `%u` formats into
+  will not compile. `src/KanardiaCommon.h` adds a constrained mixed-type
+  overload, and `cmake/KanardiaSources.cmake` force-includes it into every
+  Common source with `-include` -- which is also where `<cstring>` and a
+  printf-style `qDebug()` come from, both for `CanPort/CanuCan.cpp`, which the
+  simulator builds and which assumes Qt's headers got there first. The same mismatch turns Common's `%u` formats into
   `-Werror=format` failures, hence `-Wno-format` on those sources. Upstream both
   want fixing properly (`common::IsInside<int32_t>(...)`, `PRIu32`).
 - **Two Common sources need exceptions back.** `BLOB/BLOBPackUnpack.cpp` and
   `Compress/CompressZeros.cpp` `throw` on malformed input, which will not
-  compile under IDF's global `-fno-exceptions`. They are built with
-  `-fexceptions`; the throwing branches are unreachable here, and would
-  terminate if they ever fired. `-DNO_LZO_COMPRESSION` (Common's own switch)
+  compile under IDF's global `-fno-exceptions`. On the board they are built
+  with `-fexceptions`; the throwing branches are unreachable here, and would
+  terminate if they ever fired. The desktop has exceptions anyway. `-DNO_LZO_COMPRESSION` (Common's own switch)
   keeps miniLZO out of the image.
 
-**Fonts are generated, not checked in.** `main/CMakeLists.txt` runs
+**Fonts are generated, not checked in.** `cmake/KanardiaFonts.cmake` runs
 `Public/Font/Kanardia.ttf` through `lv_font_conv` at build time -- LVGL's own
 pipeline, the same tool `scripts/built_in_font/` uses for Montserrat -- and
 emits one `.c` per size into the build tree plus a generated `KanardiaFont.h`
@@ -154,8 +217,8 @@ nothing in this project draws with them any more.
 
 **Values are printed through Common's own formatting layer.** `Avio/Format/AvioFormat.h`
 is the entry point: it holds the one process-wide `unit::Formatter*`, which
-`Main.cpp` installs with `avio::format::SetUnitFormatter()` before the scene is
-built. Everything below reaches it from there -- `avio::format::ToString()`,
+`src/App.cpp` installs with `avio::format::SetUnitFormatter()` before the scene
+is built. Everything below reaches it from there -- `avio::format::ToString()`,
 `Formatter::FormatAzimuth()`, the `Parameter` overloads -- so no call site
 carries a formatter. `unit::FormatterUtf8` is the one we install; it maps a
 `unit::Key` onto the private-use codepoint `Common/UserTTF.h` assigns it, so
@@ -187,44 +250,64 @@ Four things to know:
 `main/CMakeLists.txt` also defines **`ESP32`** for the Common sources:
 `Common/Defines.h` routes `PRINTF` to `ESP_LOGI` behind `defined(ESP32)`, and
 IDF does not define it for the P4. It is the only `ESP32` test in the whole
-tree, so it just selects the logging branch Common already intends.
+tree, so it just selects the logging branch Common already intends. The
+simulator does not define it, which is why Common's `PRINTF` lands on `printf`
+there -- see the note about stdout above.
 
-**Common → the CAN bus.** `CanPortEsp` implements `can::AbstractCanPort` on
-the P4's TWAI controller, and `CanProcessor` is the CANaerospace side: it
+**Common → the CAN bus.** `app::CanPort` (src/CanPort.h) is what the product
+asks of a bus: start, stop, mode, and the counters the console reports.
+`port/esp/CanPortEsp` implements it on the P4's TWAI controller;
+`port/pc/CanPortCanu` implements it with `can::CanuCan`, Common's own desktop
+port for the Kanardia CANU v2 adapter -- the same serial protocol Nesis talks
+to a bus through. `CanProcessor` is the CANaerospace side: it
 mirrors `can::CANHandler::Process()` -- split incoming messages by id range into
 services, status, NOD and special -- without the `CANHandler` template, which
 needs a product's whole sender/service stack. NOD messages go into the
 `DirectNOD` the model reads; sign-of-life messages go into
 `can::uCUnitInfoContainer`, the microcontroller-side unit container.
 
-`main/ApplicationDefines.h` is the extension point Common expects from every
+`src/ApplicationDefines.h` is the extension point Common expects from every
 product: our node id and which halves of the optional services we implement.
 `USE_CAN_MIS_A` asks other modules to identify themselves and answers nothing,
 so the container's "identified" count stays at zero on a bus where nobody
 answers -- correct, not a fault. `USE_CAN_DDS_B` and `USE_CAN_MCS_B` are the
 receive half of the parameter push described below.
 
-**There is CAN transceiver on this board**, GPIO30, GPIO33
-`Mode::SelfTest` is the default and exercises the whole path anyway: RX is
-mapped onto the TX pin so the GPIO matrix loops the signal back, the controller
-runs in `TWAI_MODE_NO_ACK` (nobody is there to acknowledge), and frames are
-transmitted as self-reception requests (`twai_message_t::self`). All three are
-needed -- NO_ACK alone transmits but never receives. In that mode `Simulate()`
-and `SendSignOfLife()` put real CANaerospace frames on the controller and they
-arrive back through the full decode path. Both go silent in `Mode::Normal`:
-on a real bus those ids belong to somebody else.
+**There is CAN transceiver on this board**, GPIO30, GPIO33, so the port comes
+up in `Mode::Normal`. `Mode::SelfTest` exercises the whole path without one:
+RX is mapped onto the TX pin so the GPIO matrix loops the signal back, the
+controller runs in `TWAI_MODE_NO_ACK` (nobody is there to acknowledge), and
+frames are transmitted as self-reception requests (`twai_message_t::self`).
+All three are needed -- NO_ACK alone transmits but never receives.
+
+**The simulator means the same thing by `Mode::SelfTest`**, and falls back to
+it on its own when there is no CANU adapter on the configured device -- the
+usual state on a desk. There the loopback is a queue and a receive thread
+rather than a controller, and that is load-bearing: `CanProcessor::Pump()`
+holds the service mutex while `OldServices::Update()` posts a message, so
+delivering it inline would re-enter `Process()` on the same thread and
+deadlock. Going through a thread is also the shape the board has.
+
+In self-test, on either build, `Simulate()` and `SendSignOfLife()` put real
+CANaerospace frames on the port and they arrive back through the full decode
+path -- which is what makes the simulator's instruments move. `Simulate()` goes
+silent in `Mode::Normal`: on a real bus those ids belong to somebody else.
 
 **Common → the flight model.** `AppModel.h/.cpp` derive a concrete
-`avio::ModelBase` and tick it on its own FreeRTOS task: `Update50ms()` on a
+`avio::ModelBase` and tick it on a task of its own -- `platform::StartTask()`,
+a FreeRTOS task on the board and a thread in the simulator: `Update50ms()` on a
 50 ms beat, `Update1s()` once per second, plus the CAN processor's one-second
-work. There is no GNSS receiver or options storage on this board, so those
-hooks answer "nothing connected"; the NOD is fed from the CAN port. Everything above the NOD -- GNSS,
+work. The beat is kept against `platform::Micros()` rather than by sleeping a
+period at a time, so a slow tick is absorbed instead of accumulating. There is
+no GNSS receiver on either build, so that hook answers "nothing connected"; the
+NOD is fed from the CAN port. Everything above the NOD -- GNSS,
 navigation, clock, sunrise/sunset, the above/below detectors behind
 `IsFlying()` / `IsEngineRunning()` / `IsMoving()` -- is the unmodified shared
 code. The three instrument scenes read rpm, IAS and altitude from the model, and the
 console's `i` line carries `rpm=`, `eng=`, `moving=` and `model_stack=` so the
 loop can be checked from the host. `SaveLastKnownCoordinate()` is no longer a
-stub: it marks the option dirty and lets `Settings::Save()` write it to NVS.
+stub: it marks the option dirty and lets `Settings::Save()` write it to the
+settings store.
 
 Scenes cycle `gauge` -> `scale` (tachometer, `Scale::DrawArc`) -> `ias`
 (airspeed, `Scale::DrawArcIAS`) -> `altimeter` (three pointers over a
@@ -348,39 +431,48 @@ task (`Pump()`, `Update1s()`). Before the sending half existed the overlap was
 harmless; a half-sent download whose response lands mid-`Update()` is not.
 
 `Model::SimulateParameterPush()` packs one edited parameter and pushes it at our
-own node id. In self-test the controller hands every frame back, so the
-console's `P` command drives the whole loop for real -- DDS_A, DDS_B, MCS_A,
-MCS_B, the apply and the NVS write. The tachometer's bands visibly change, and
-survive a reboot.
+own node id. In self-test every frame comes back, so the console's `P` command
+drives the whole loop for real -- DDS_A, DDS_B, MCS_A, MCS_B, the apply and the
+write to the settings store. The tachometer's bands visibly change, and survive
+a restart. It runs in the simulator too, which is the cheapest way to exercise
+that path.
 
 **The parameter set is saved as one blob.** `Settings::SaveParameters()` /
 `LoadParameters()` wrap `parameter::ParamStorage`, which packs the whole
 container into a single flatbuffer and LZO-compresses it: 451 bytes for our
-three parameters. That is one NVS entry, not one per key -- unlike the options
+three parameters. That is one entry, not one per key -- unlike the options
 -- because that packed form is what the rest of the Kanardia tooling reads and
 writes, and splitting it would make the blob non-portable. `ParamStorage::Load()`
 answers silently on a bad CRC, so `LoadParameters()` proves the blob names at
 least one parameter we hold before applying it.
 
 Bringing `ParamStorage` in pulled miniLZO into the image (`LZO/minilzo.c`, built
-as C and deliberately outside `SRC_COMMON_FILES`, because those get
+as C and deliberately outside `KANARDIA_COMMON_SOURCES`, because those get
 `-include KanardiaCommon.h`), plus `Param.cpp`, `ParamContainer.cpp`,
 `ParamFuelLevel.cpp`, `CanIdDetails.cpp` and `CRC-32.cpp`.
 
-**Options live in NVS.** `partitions.csv` carries two 4 MB app slots (`ota_0`,
-`ota_1`) plus `otadata`, so the firmware can be replaced over the air, and a
-24 kB `settings` NVS partition of our own -- separate from the default `nvs`,
-which is IDF's for Wi-Fi and PHY calibration.
-
-`StorageOptions.h/.cpp` keeps one NVS entry per `option::Key`, named
-`opt_<number>`:
-Common already packs each option into a flatbuffer through
-`Container::GetBLOB()` / `SetBLOB()`, and NVS is a key/blob store with its own
-wear levelling and per-entry CRC, so the two meet directly with no framing of
+**Options live in a key/blob store.** `src/StorageOptions.h/.cpp` keeps one
+entry per `option::Key`, named `opt_<number>`: Common already packs each option
+into a flatbuffer through `Container::GetBLOB()` / `SetBLOB()`, and a key/blob
+store is exactly what that wants, so the two meet directly with no framing of
 our own. That is deliberately *not* `Container::Save()`, which packs everything
 into one image behind a size and a CRC -- the right shape for the raw flash the
 other products write to, but here it would mean rewriting every option to
 change one.
+
+What the entries land in is `app::BlobStore`, and it is the only part of this
+that differs between the builds:
+
+- **the board** uses NVS (`port/esp/BlobStoreNvs.cpp`), which brings its own
+  wear levelling and per-entry CRC. `partitions.csv` carries two 4 MB app slots
+  (`ota_0`, `ota_1`) plus `otadata`, so the firmware can be replaced over the
+  air, and a 24 kB `settings` NVS partition of our own -- separate from the
+  default `nvs`, which is IDF's for Wi-Fi and PHY calibration;
+- **the simulator** uses a directory of files (`port/pc/BlobStoreFile.cpp`),
+  one `<key>.blob` each, under `$ESPP4_SIM_STATE` or `$XDG_STATE_HOME/espp4-sim`.
+  Writes go to a temporary file and are renamed into place, which buys what the
+  per-entry CRC buys on the board: an interrupted write leaves the previous
+  value rather than half of the new one.
 
 `AppOptions.h/.cpp` exists because `option::Container` keeps its item list
 protected: `app::Options` derives from `option::ModelBase` so `Settings` can
@@ -399,21 +491,22 @@ Three things to know:
   stack and the board aborted at boot with `pthread: Failed to create task`.
   `partitions.csv` carries the measurements; re-read app_main's `largest block`
   line after changing the size.
-- **The big stacks are taken first, on purpose.** `Main.cpp` starts the serial
-  console before the model loop, and `StartModelLoop()` starts the CAN port
-  before mounting NVS. Three things each need a contiguous 32 kB -- the LVGL
+- **The big stacks are taken first, on purpose.** `app::Startup()` starts the
+  serial console before the model loop, and `StartModelLoop()` starts the CAN
+  port before mounting the settings store. Three things each need a contiguous 32 kB -- the LVGL
   task, the console task, the CAN thread -- and after boot the largest free
   internal block is about 31 kB. There is no room for a fourth.
 - **Only dirty options are written.** `Settings::Save()` walks the per-key
   dirty flags; pass `false` to force the whole set out, which is what populates
-  a fresh partition on the first boot and what the console's `w` command does.
+  a fresh store on the first boot and what the console's `w` command does.
 
 ### The canvas must stay ARGB8888
 
 `lv_draw_sw_vector` renders straight into an ARGB8888/XRGB8888 buffer. For any
 other format — including the panel's native RGB565 — it allocates a temporary
 full-area ARGB8888 buffer and blends back **on every frame**. Do not "optimise"
-the canvas to RGB565.
+the canvas to RGB565. This is why the simulator's `LV_COLOR_DEPTH 32` and the
+board's 16 do not matter here: the canvas is ARGB8888 in both.
 
 ## Constraints that are load-bearing
 
@@ -433,13 +526,17 @@ full reasoning; the short version:
   16 KB `Cell` buffer on the stack, so any thread that rasterises needs ≥ 32 KB:
   `CONFIG_LV_DRAW_THREAD_STACK_SIZE`, `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
   (ThorVG's own `std::thread` workers, spawned when `LV_DRAW_SW_DRAW_UNIT_CNT > 1`),
-  and `cfg.lv_adapter_cfg.task_stack_size` in `Main.cpp`. Setting
+  and `cfg.lv_adapter_cfg.task_stack_size` in `port/esp/MainEsp.cpp`. Setting
   `CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1` removes the ThorVG worker pool entirely and
   is the fallback if internal RAM runs short.
 - **`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`** — the only host link is
   `/dev/ttyACM0`. As a *secondary* console USB-Serial/JTAG is output-only, so the
   debug console cannot be driven from the host unless it is primary.
 - **`CONFIG_LV_USE_SNAPSHOT=y`** — needed by the console's screenshot command.
+- **`port/pc/lv_conf.h` is LVGL's own template with eleven values changed**, and
+  is kept in LVGL's style -- doxygen comments and all -- so that an LVGL upgrade
+  is a re-copy and a diff. The kanardia-style skill skips it for that reason.
+  Its header lists every change and why.
 - **This IDF is v5.5.1.** It does not know ESP32-P4 rev 3.x or 250 MHz PSRAM.
   Waveshare's own examples set `CONFIG_ESP32P4_REV_MIN_300` and
   `CONFIG_SPIRAM_SPEED_250M`, which do not exist here and silently drop PSRAM to
@@ -458,7 +555,8 @@ It reads `SKILL.md` for the reasoning; the short version:
 Calls into LVGL and `lvgl_cpp` keep those libraries' snake_case names. This is
 the one rule the script cannot check for you.
 
-**Every `main/*.h` and `main/*.cpp` opens with the Kanardia copyright banner**,
+**Every `.h` and `.cpp` in `src/` and `port/` opens with the Kanardia copyright
+banner**,
 then -- in a header -- `#pragma once`. Never an `#ifndef` include guard. An
 `#ifndef` around a *valued* `#define` is a configuration default rather than a
 guard and stays put, which is what `CAN_NODE_ID` in `ApplicationDefines.h` is.
@@ -485,15 +583,15 @@ code it describes and which it then treats as a fixed point. Leading tabs
 followed by *more* spaces than tabs are genuine continuation-line alignment and
 must be left alone.
 
-None of this applies outside `main/`. `managed_components/` and the shared
-`Public/Common` tree are third-party as far as this repo is concerned, carry
-their own style, and are never reformatted.
+None of this applies outside `src/` and `port/`. `managed_components/`, the
+shared `Public/Common` tree and `port/pc/lv_conf.h` are third-party as far as
+this repo is concerned, carry their own style, and are never reformatted.
 
 ## Known board quirks
 
 - `W ledc: GPIO 26 is not usable` at boot means backlight PWM init failed, so
   `bsp_display_backlight_on()` is a no-op. If the panel is dark, start there.
 - BSP 3.0.1 leaves GT911 RST/INT unconfigured, probes `0x5D` then `0x14`, and
-  polls without an ISR. `cfg.touch_flags` in `Main.cpp` flips axes.
+  polls without an ISR. `cfg.touch_flags` in `port/esp/MainEsp.cpp` flips axes.
 - `on_frame_buf_complete unavailable` means `TEAR_AVOID_MODE_TRIPLE_PARTIAL` may
   not fully suppress tearing; try `DOUBLE_FULL`.

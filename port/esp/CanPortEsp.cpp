@@ -12,7 +12,9 @@
 
 #include "CanPortEsp.h"
 
-#include "esp_log.h"
+#include "Platform.h"
+
+#include "esp_pthread.h"
 
 namespace app {
 
@@ -23,12 +25,23 @@ namespace {
 // Receive timeout, so the loop can notice a stop request.
 	constexpr TickType_t RX_WAIT = pdMS_TO_TICKS(200);
 
-	twai_mode_t ToTwaiMode(CanPortEsp::Mode eMode)
+// The receive thread's stack.
+//
+// AbstractCanPort::StartLoopProcess() opens a std::jthread, so its stack comes
+// from CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT -- 32 kB, which is sized for
+// ThorVG's worker pool and its 16 kB on-stack Cell buffer. This thread only
+// decodes frames, and asking for 32 kB of *contiguous* internal RAM here is
+// what finally broke: after boot the largest free block is 31744 B, so
+// pthread_create failed and std::thread called abort(). This is what the loop
+// actually needs, with room to spare.
+	constexpr uint32_t CAN_STACK = 12 * 1024;
+
+	twai_mode_t ToTwaiMode(CanPort::Mode eMode)
 	{
 		switch(eMode) {
-		case CanPortEsp::Mode::Listen:	return TWAI_MODE_LISTEN_ONLY;
-		case CanPortEsp::Mode::SelfTest: return TWAI_MODE_NO_ACK;
-		case CanPortEsp::Mode::Normal:	break;
+		case CanPort::Mode::Listen:	return TWAI_MODE_LISTEN_ONLY;
+		case CanPort::Mode::SelfTest: return TWAI_MODE_NO_ACK;
+		case CanPort::Mode::Normal:	break;
 		}
 		return TWAI_MODE_NORMAL;
 	}
@@ -53,7 +66,7 @@ namespace {
 // --------------------------------------------------------------------------
 
 CanPortEsp::CanPortEsp(FuncProcessMsg&& fProcMsg, const Config& cfg) :
-	can::AbstractCanPort(std::move(fProcMsg)),
+	CanPort(std::move(fProcMsg)),
 	m_cfg(cfg)
 {}
 
@@ -66,18 +79,6 @@ CanPortEsp::~CanPortEsp()
 
 // --------------------------------------------------------------------------
 
-const char* CanPortEsp::ModeName(Mode eMode)
-{
-	switch(eMode) {
-	case Mode::Normal:	return "normal";
-	case Mode::Listen:	return "listen";
-	case Mode::SelfTest: return "self-test";
-	}
-	return "?";
-}
-
-// --------------------------------------------------------------------------
-
 bool CanPortEsp::Start()
 {
 	if(m_bRunning)
@@ -85,7 +86,7 @@ bool CanPortEsp::Start()
 
 	twai_timing_config_t timing{};
 	if(MakeTiming(m_cfg.uBitrateKbps, timing) == false) {
-		ESP_LOGE(TAG, "%u kbit/s is not one of the rates the driver offers", static_cast<unsigned>(m_cfg.uBitrateKbps));
+		APP_LOGE(TAG, "%u kbit/s is not one of the rates the driver offers", static_cast<unsigned>(m_cfg.uBitrateKbps));
 		return false;
 	}
 
@@ -94,12 +95,12 @@ bool CanPortEsp::Start()
 	// and mapping RX to the same pin as TX, so the GPIO matrix feeds the
 	// outgoing signal straight back into the receiver. The frames themselves
 	// additionally have to be sent as self-reception requests -- see Send().
-	if(m_cfg.eMode == Mode::SelfTest && m_cfg.eRx != m_cfg.eTx) {
-		ESP_LOGI(TAG, "self-test: looping RX back onto GPIO%d", static_cast<int>(m_cfg.eTx));
-		m_cfg.eRx = m_cfg.eTx;
+	if(m_cfg.eMode == Mode::SelfTest && m_eRx != m_eTx) {
+		APP_LOGI(TAG, "self-test: looping RX back onto GPIO%d", static_cast<int>(m_eTx));
+		m_eRx = m_eTx;
 	}
 
-	twai_general_config_t general = TWAI_GENERAL_CONFIG_DEFAULT(m_cfg.eTx, m_cfg.eRx, ToTwaiMode(m_cfg.eMode));
+	twai_general_config_t general = TWAI_GENERAL_CONFIG_DEFAULT(m_eTx, m_eRx, ToTwaiMode(m_cfg.eMode));
 	// CANaerospace traffic is bursty; a deeper RX queue costs little.
 	general.rx_queue_len = 64;
 	general.tx_queue_len = 16;
@@ -109,25 +110,40 @@ bool CanPortEsp::Start()
 
 	esp_err_t err = twai_driver_install(&general, &timing, &filter);
 	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "twai_driver_install: %s", esp_err_to_name(err));
+		APP_LOGE(TAG, "twai_driver_install: %s", esp_err_to_name(err));
 		return false;
 	}
 
 	err = twai_start();
 	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "twai_start: %s", esp_err_to_name(err));
+		APP_LOGE(TAG, "twai_start: %s", esp_err_to_name(err));
 		twai_driver_uninstall();
 		return false;
 	}
 
 	m_bRunning = true;
+
+	// The receive thread gets its own, smaller stack -- see CAN_STACK above.
+	//
+	// esp_pthread_set_cfg() is per-calling-task and not inherited, so this only
+	// reaches the thread StartLoopProcess() opens; ThorVG's workers are created
+	// from the LVGL task and keep the 32 kB default.
+	const esp_pthread_cfg_t pthreadPrev = esp_pthread_get_default_config();
+	esp_pthread_cfg_t			pthreadCfg	= pthreadPrev;
+	pthreadCfg.stack_size					= CAN_STACK;
+	pthreadCfg.thread_name					= "can_rx";
+	pthreadCfg.inherit_cfg					= false;
+	ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadCfg));
+
 	StartLoopProcess();
 
-	ESP_LOGI(
+	ESP_ERROR_CHECK(esp_pthread_set_cfg(&pthreadPrev));
+
+	APP_LOGI(
 		TAG,
 		"TWAI up: tx=GPIO%d rx=GPIO%d %u kbit/s mode=%s",
-		static_cast<int>(m_cfg.eTx),
-		static_cast<int>(m_cfg.eRx),
+		static_cast<int>(m_eTx),
+		static_cast<int>(m_eRx),
 		static_cast<unsigned>(m_cfg.uBitrateKbps),
 		ModeName(m_cfg.eMode)
 	);
@@ -151,7 +167,7 @@ void CanPortEsp::Stop()
 
 	twai_stop();
 	twai_driver_uninstall();
-	ESP_LOGI(TAG, "TWAI down");
+	APP_LOGI(TAG, "TWAI down");
 }
 
 // --------------------------------------------------------------------------
@@ -231,7 +247,7 @@ uint32_t CanPortEsp::GetBusState() const
 
 void CanPortEsp::Loop(std::stop_token st)
 {
-	ESP_LOGI(TAG, "receive loop running");
+	APP_LOGI(TAG, "receive loop running");
 
 	while(st.stop_requested() == false) {
 		twai_message_t	 tm{};
@@ -249,7 +265,17 @@ void CanPortEsp::Loop(std::stop_token st)
 		OnReceive(FromTwai(tm));
 	}
 
-	ESP_LOGI(TAG, "receive loop stopped");
+	APP_LOGI(TAG, "receive loop stopped");
+}
+
+// --------------------------------------------------------------------------
+
+CanPort* CreateCanPort(can::AbstractCanPort::FuncProcessMsg&& fProcMsg, const CanPort::Config& cfg)
+{
+	// A function-local static, like every other singleton here: alive for the
+	// life of the process and built the first time it is asked for.
+	static CanPortEsp port(std::move(fProcMsg), cfg);
+	return &port;
 }
 
 } // namespace app

@@ -41,8 +41,6 @@
 #include "Application/uCUnitInfoContainer.h"
 #include "CanAerospace/SOLAutoId.h"
 
-#include "esp_ota_ops.h"
-
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -93,16 +91,17 @@ public:
 	// --- Firmware update over CAN -------------------------------------
 	//
 	// The three calls APS_B makes on its way through a transfer, mapped onto
-	// ESP-IDF's OTA API. Named for the uC world APS came from: there,
-	// "call the boot app programmer" jumps into the bootloader. Here it opens
-	// a write to whichever app slot is not running.
+	// `platform::FirmwareTarget`. Named for the uC world APS came from:
+	// there, "call the boot app programmer" jumps into the bootloader. On the
+	// board it opens a write to whichever app slot is not running; in the
+	// simulator it opens a file.
 	//
 	// All three run on the port's receive thread, where HandleAPS() is
 	// reached from Process().
 
 	// Begin a transfer of uiPageCount 2 kB pages from node byNodeA.
 	void CallBootAppProgrammer(uint32_t uiPageCount, uint32_t byNodeA) override;
-	// One verified 2 kB page, in order, straight into the inactive slot.
+	// One verified 2 kB page, in order, straight into the target.
 	void WriteUpdate(const uint8_t* pData, uint32_t uiSize) override;
 	// Close the transfer; on success the slot becomes the boot partition.
 	void FinishUpdate(bool bOk) override;
@@ -197,13 +196,11 @@ private:
 	can::SOLAutoId m_autoId;
 
 #if defined(USE_CAN_APS_B)
-	// The OTA write in progress, or a closed handle and a null partition when
-	// no transfer is running. APS_B holds the page buffer and the retry count;
-	// all this side keeps is where the bytes go.
-	esp_ota_handle_t		  m_hOta		  = 0;
-	const esp_partition_t* m_pOtaPart  = nullptr;
-	uint32_t					  m_uOtaPages = 0;	 // pages written so far
-	uint32_t					  m_uOtaTotal = 0;	 // pages the sender announced
+	// The transfer in progress. The handle and the flash or file behind it
+	// belong to platform::GetFirmwareTarget(), and APS_B holds the page buffer
+	// and the retry count; all this side keeps is the tally.
+	uint32_t m_uOtaPages = 0; // pages written so far
+	uint32_t m_uOtaTotal = 0; // pages the sender announced
 #endif
 
 	// OldServices is a plain state machine with no locking of its own, and it

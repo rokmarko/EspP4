@@ -12,28 +12,23 @@
 
 #pragma once
 
-// Option blobs kept in NVS.
+// The options and the parameter set, kept between boots.
 //
 // Common already knows how to turn an option into a blob: every registered
 // `option::Key` has a `Serialize` that packs it into a flatbuffer, and
-// `Container::GetBLOB()` / `SetBLOB()` are the two ends of that. NVS is a
-// key/blob store with its own wear levelling and per-entry CRC, so the two fit
-// together directly -- one NVS entry per option key, no framing of our own.
+// `Container::GetBLOB()` / `SetBLOB()` are the two ends of that. All a product
+// has to add is somewhere to put the bytes -- which is `app::BlobStore`, and
+// the only part of this that differs between the board and the simulator.
+// Everything in this file is shared.
 //
 // That is deliberately *not* `Container::Save()`, which packs every option into
 // one flat image with a size and a CRC in front. That shape suits the raw
 // flash and EEPROM the other products write to; here it would mean rewriting
-// every option to change one, and re-implementing what NVS already does.
-//
-// The store lives in its own `settings` partition (see `partitions.csv`) so it
-// never competes for space with the Wi-Fi calibration data IDF keeps in the
-// default `nvs`.
+// every option to change one, and re-implementing what the store already does.
 
 #include "KanardiaCommon.h"
 
-#include "BLOB/BLOB.h"
-
-#include "nvs.h"
+#include "BlobStore.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -47,29 +42,23 @@ class Options;
 class Settings
 {
 public:
-	// Partition label, as spelled in partitions.csv.
-	static constexpr const char* PARTITION = "settings";
-	// NVS namespace inside it. Room for others alongside.
-	static constexpr const char* NAMESPACE = "option";
+	// What the console reports and what a port fills in.
+	using Usage = BlobStore::Usage;
 
-	Settings()									 = default;
+	Settings();
 	Settings(const Settings&)				 = delete;
 	Settings& operator=(const Settings&) = delete;
 	~Settings();
 
-	// Mount the partition and open the namespace.
+	// Open the store this build keeps its settings in.
 	//
-	// A blank or out-of-date NVS partition is erased and re-initialised --
-	// neither is recoverable by reading, and on this board losing the options
-	// costs nothing but their defaults.
-	//
-	// Returns false if the partition is missing or unusable; every other call
-	//         then does nothing and answers false.
+	// Returns false if there is none, after which every other call does
+	//         nothing and answers false.
 	bool Open();
 	void Close();
-	bool IsOpen() const { return m_bOpen; }
+	bool IsOpen() const;
 
-	// Read every registered option that has an entry in NVS.
+	// Read every registered option that has an entry in the store.
 	//
 	// Missing keys are left at their defaults, which is the normal state on a
 	// first boot -- not an error.
@@ -89,7 +78,7 @@ public:
 
 	// Restore the instrument parameters from their blob.
 	//
-	// Unlike the options, the whole container is one NVS entry: `ParamStorage`
+	// Unlike the options, the whole container is one entry: `ParamStorage`
 	// packs every parameter into a single flatbuffer and LZO-compresses it,
 	// which is the form the rest of the Kanardia tooling reads and writes, and
 	// splitting it per can::Id would make the blob non-portable.
@@ -110,20 +99,13 @@ public:
 	bool WriteBlob(const char* pcKey, common::SpanBLOB blob, bool bCommit = true);
 	bool Commit();
 
-	// Drop everything in the namespace. Takes effect immediately.
+	// Drop everything in the store. Takes effect immediately.
 	bool Erase();
 
-	struct Usage
-	{
-		size_t uUsed  = 0;
-		size_t uFree  = 0;
-		size_t uTotal = 0;
-	};
 	Usage GetUsage() const;
 
 private:
-	nvs_handle_t m_hNvs	= 0;
-	bool			 m_bOpen = false;
+	BlobStore& m_store;
 };
 
 // --------------------------------------------------------------------------

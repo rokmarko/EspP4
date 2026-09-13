@@ -17,7 +17,7 @@
 #include "CanAerospace/ModuleConfigIds.h"
 #include "CRC/CRC-16.h"
 
-#include "esp_log.h"
+#include "Platform.h"
 
 #include <cstring>
 
@@ -35,7 +35,7 @@ CanProcessor::CanProcessor(can::DirectNOD& nod, can::AbstractCanPort& port, uint
 {
 	SetNodeId(CAN_NODE_ID);
 	Units().SetOldService(&m_services);
-	ESP_LOGI(TAG, "node id %u (CAN_NODE_ID=%u)", static_cast<unsigned>(GetNodeId()), static_cast<unsigned>(CAN_NODE_ID));
+	APP_LOGI(TAG, "node id %u (CAN_NODE_ID=%u)", static_cast<unsigned>(GetNodeId()), static_cast<unsigned>(CAN_NODE_ID));
 }
 
 // --------------------------------------------------------------------------
@@ -161,37 +161,23 @@ void CanProcessor::CallBootAppProgrammer(uint32_t uiPageCount, uint32_t byNodeA)
 	// APS_B packs it that way for the uC bootloader call.
 	const unsigned uSender = byNodeA & 0xFF;
 
+	platform::FirmwareTarget& target = platform::GetFirmwareTarget();
+
 	// A sender that restarts mid-transfer just sends another start.
-	if(m_hOta != 0)
+	if(target.IsOpen())
 		AbortUpdate("restarted by the sender");
 
-	// Never the slot we are executing from. On a board flashed over USB that
-	// is ota_0, so the first update lands in ota_1 and they alternate.
-	m_pOtaPart = esp_ota_get_next_update_partition(nullptr);
-	if(m_pOtaPart == nullptr) {
-		ESP_LOGE(TAG, "APS: no OTA slot to write to");
-		return;
-	}
-
-	// OTA_SIZE_UNKNOWN erases lazily, page by page, instead of erasing four
-	// megabytes up front while the sender waits for us to ask for page 0.
-	const esp_err_t err = esp_ota_begin(m_pOtaPart, OTA_SIZE_UNKNOWN, &m_hOta);
-	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "APS: esp_ota_begin: %s", esp_err_to_name(err));
-		m_hOta	  = 0;
-		m_pOtaPart = nullptr;
-		return;
-	}
+	if(target.Begin(uiPageCount) == false)
+		return;  // the target has said why
 
 	m_uOtaPages = 0;
 	m_uOtaTotal = uiPageCount;
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
-		"APS: update from node %u, %u pages of 2 kB -> %s @ 0x%06x",
+		"APS: update from node %u, %u pages of 2 kB -> %s",
 		uSender,
 		static_cast<unsigned>(uiPageCount),
-		m_pOtaPart->label,
-		static_cast<unsigned>(m_pOtaPart->address)
+		target.GetName()
 	);
 }
 
@@ -199,12 +185,11 @@ void CanProcessor::CallBootAppProgrammer(uint32_t uiPageCount, uint32_t byNodeA)
 
 void CanProcessor::WriteUpdate(const uint8_t* pData, uint32_t uiSize)
 {
-	if(m_hOta == 0)
-		return;	  // a page after a failed begin, or after an abort
+	platform::FirmwareTarget& target = platform::GetFirmwareTarget();
+	if(target.IsOpen() == false)
+		return;  // a page after a failed begin, or after an abort
 
-	const esp_err_t err = esp_ota_write(m_hOta, pData, uiSize);
-	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "APS: esp_ota_write page %u: %s", static_cast<unsigned>(m_uOtaPages), esp_err_to_name(err));
+	if(target.Write(pData, uiSize) == false) {
 		AbortUpdate("write failed");
 		return;
 	}
@@ -214,7 +199,7 @@ void CanProcessor::WriteUpdate(const uint8_t* pData, uint32_t uiSize)
 	// agree on. Log sparsely: a 1.2 MB image is close to 600 of them.
 	m_uOtaPages++;
 	if((m_uOtaPages % 64) == 0 || m_uOtaPages == m_uOtaTotal) {
-		ESP_LOGI(TAG, "APS: %u/%u pages", static_cast<unsigned>(m_uOtaPages), static_cast<unsigned>(m_uOtaTotal));
+		APP_LOGI(TAG, "APS: %u/%u pages", static_cast<unsigned>(m_uOtaPages), static_cast<unsigned>(m_uOtaTotal));
 	}
 }
 
@@ -222,7 +207,8 @@ void CanProcessor::WriteUpdate(const uint8_t* pData, uint32_t uiSize)
 
 void CanProcessor::FinishUpdate(bool bOk)
 {
-	if(m_hOta == 0)
+	platform::FirmwareTarget& target = platform::GetFirmwareTarget();
+	if(target.IsOpen() == false)
 		return;
 
 	if(bOk == false) {
@@ -230,46 +216,30 @@ void CanProcessor::FinishUpdate(bool bOk)
 		return;
 	}
 
-	// esp_ota_end() is the real verdict: it validates the image header and
-	// checksum of what actually landed in flash. A transfer whose pages all
-	// passed their CRC can still be a corrupt image.
-	esp_err_t err = esp_ota_end(m_hOta);
-	m_hOta		  = 0;
-	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "APS: esp_ota_end: %s", esp_err_to_name(err));
-		m_pOtaPart = nullptr;
+	// Finish() is the real verdict: it validates the image header and checksum
+	// of what actually landed. A transfer whose pages all passed their CRC can
+	// still be a corrupt image.
+	//
+	// Deliberately no restart here. The panel is flying the aircraft as far as
+	// it knows; when the new image starts is the operator's call, and the next
+	// reset is soon enough.
+	if(target.Finish() == false)
 		return;
-	}
 
-	err = esp_ota_set_boot_partition(m_pOtaPart);
-	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "APS: esp_ota_set_boot_partition: %s", esp_err_to_name(err));
-		m_pOtaPart = nullptr;
-		return;
-	}
-
-	// Deliberately no esp_restart() here. The panel is flying the aircraft as
-	// far as it knows; when the new image starts is the operator's call, and
-	// the next reset is soon enough.
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"APS: update complete, %u pages -> %s; runs at the next reset",
 		static_cast<unsigned>(m_uOtaPages),
-		m_pOtaPart->label
+		target.GetName()
 	);
-	m_pOtaPart = nullptr;
 }
 
 // --------------------------------------------------------------------------
 
 void CanProcessor::AbortUpdate(const char* pReason)
 {
-	if(m_hOta != 0) {
-		esp_ota_abort(m_hOta);
-		m_hOta = 0;
-	}
-	m_pOtaPart = nullptr;
-	ESP_LOGW(TAG, "APS: update abandoned after %u pages -- %s", static_cast<unsigned>(m_uOtaPages), pReason);
+	platform::GetFirmwareTarget().Abort();
+	APP_LOGW(TAG, "APS: update abandoned after %u pages -- %s", static_cast<unsigned>(m_uOtaPages), pReason);
 	m_uOtaPages = 0;
 	m_uOtaTotal = 0;
 }
@@ -329,12 +299,12 @@ bool CanProcessor::AcceptDownload(uint32_t uiDataId, uint8_t byMsgCount) const
 	// Kanardia tools use to push a parameter at a unit; the typed ids are for
 	// a product's own flash structures and mean nothing here.
 	if(uiDataId != DDS_BUFFER) {
-		ESP_LOGW(TAG, "download id %u rejected (only DDS_BUFFER is accepted)", static_cast<unsigned>(uiDataId));
+		APP_LOGW(TAG, "download id %u rejected (only DDS_BUFFER is accepted)", static_cast<unsigned>(uiDataId));
 		return false;
 	}
 
 	if(static_cast<uint32_t>(byMsgCount) * 4u > BUFFER_SIZE) {
-		ESP_LOGW(
+		APP_LOGW(
 			TAG,
 			"download of %u messages rejected, buffer holds %u",
 			static_cast<unsigned>(byMsgCount),
@@ -343,7 +313,7 @@ bool CanProcessor::AcceptDownload(uint32_t uiDataId, uint8_t byMsgCount) const
 		return false;
 	}
 
-	ESP_LOGI(TAG, "accepting a %u byte buffer push", static_cast<unsigned>(byMsgCount) * 4u);
+	APP_LOGI(TAG, "accepting a %u byte buffer push", static_cast<unsigned>(byMsgCount) * 4u);
 	return true;
 }
 
@@ -380,7 +350,7 @@ int32_t CanProcessor::ConfigureModule(const can::Message& msg)
 
 	const uint8_t uConfigId = os::GetMessageCode(msg);
 	if(uConfigId != MCS_APPLY_BUFFER_DATA) {
-		ESP_LOGD(TAG, "unsupported module config id %u", static_cast<unsigned>(uConfigId));
+		APP_LOGD(TAG, "unsupported module config id %u", static_cast<unsigned>(uConfigId));
 		return MCS_FAILURE;
 	}
 
@@ -391,18 +361,18 @@ int32_t CanProcessor::ConfigureModule(const can::Message& msg)
 	const uint16_t uSize	  = static_cast<uint16_t>(uPacked >> 16);
 
 	if(uSize == 0 || uSize > BUFFER_SIZE) {
-		ESP_LOGW(TAG, "apply-buffer size %u out of range", static_cast<unsigned>(uSize));
+		APP_LOGW(TAG, "apply-buffer size %u out of range", static_cast<unsigned>(uSize));
 		return MCS_FAILURE;
 	}
 
 	if(common::CRC16::Calc(m_abyBuffer, uSize) != uCRC) {
-		ESP_LOGW(TAG, "apply-buffer CRC mismatch over %u bytes", static_cast<unsigned>(uSize));
+		APP_LOGW(TAG, "apply-buffer CRC mismatch over %u bytes", static_cast<unsigned>(uSize));
 		return MCS_FAILURE;
 	}
 
 	const auto eCommand = os::BufferDownloadCommand(os::GetDataIndex(msg));
 	if(eCommand != os::BufferDownloadCommand::Parameter) {
-		ESP_LOGW(TAG, "apply-buffer command %u not supported", static_cast<unsigned>(os::GetDataIndex(msg)));
+		APP_LOGW(TAG, "apply-buffer command %u not supported", static_cast<unsigned>(os::GetDataIndex(msg)));
 		return MCS_FAILURE;
 	}
 
@@ -414,7 +384,7 @@ int32_t CanProcessor::ConfigureModule(const can::Message& msg)
 	}
 	m_uParamPush++;
 
-	ESP_LOGI(
+	APP_LOGI(
 		TAG, "parameter push accepted: %u bytes, CRC 0x%04x", static_cast<unsigned>(uSize), static_cast<unsigned>(uCRC)
 	);
 	return MCS_SUCCESS;
@@ -455,14 +425,14 @@ void CanProcessor::ProcessModuleConfigResponse(const can::Message& msg)
 {
 	const int32_t iResult = msg.GetRegisterB().i32;
 	if(iResult == MCS_SUCCESS)
-		ESP_LOGI(
+		APP_LOGI(
 			TAG,
 			"node %u accepted config %u",
 			static_cast<unsigned>(msg.GetSender()),
 			static_cast<unsigned>(can::oldservice::GetMessageCode(msg))
 		);
 	else
-		ESP_LOGW(
+		APP_LOGW(
 			TAG,
 			"node %u refused config %u (%d)",
 			static_cast<unsigned>(msg.GetSender()),
@@ -484,7 +454,7 @@ bool CanProcessor::PushBuffer(uint8_t byNodeB, can::oldservice::BufferDownloadCo
 	const uint32_t uWords = (blob.size() + 3u) / 4u;
 	if(uWords > 255u) {
 		// A message code is one byte, so that is the protocol's own ceiling.
-		ESP_LOGE(
+		APP_LOGE(
 			TAG,
 			"buffer of %u bytes needs %u messages, the limit is 255",
 			static_cast<unsigned>(blob.size()),
@@ -495,7 +465,7 @@ bool CanProcessor::PushBuffer(uint8_t byNodeB, can::oldservice::BufferDownloadCo
 
 	std::lock_guard<std::mutex> lock(m_mxServices);
 	if(m_services.IsDownloadActive() || m_bPushCommitPending) {
-		ESP_LOGW(TAG, "a push is already running");
+		APP_LOGW(TAG, "a push is already running");
 		return false;
 	}
 
@@ -512,12 +482,12 @@ bool CanProcessor::PushBuffer(uint8_t byNodeB, can::oldservice::BufferDownloadCo
 
 	m_services.ResetDownload();
 	if(m_services.StartDownloadService(byNodeB, static_cast<uint8_t>(uWords), DDS_BUFFER) == false) {
-		ESP_LOGE(TAG, "could not start the download to node %u", static_cast<unsigned>(byNodeB));
+		APP_LOGE(TAG, "could not start the download to node %u", static_cast<unsigned>(byNodeB));
 		return false;
 	}
 
 	m_bPushCommitPending = true;
-	ESP_LOGI(
+	APP_LOGI(
 		TAG,
 		"pushing %u bytes to node %u in %u messages",
 		static_cast<unsigned>(blob.size()),
@@ -577,7 +547,7 @@ void CanProcessor::Pump()
 			);
 		}
 		else {
-			ESP_LOGE(
+			APP_LOGE(
 				TAG,
 				"push to node %u failed: %s",
 				static_cast<unsigned>(m_uPushNode),

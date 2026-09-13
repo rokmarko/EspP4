@@ -10,7 +10,11 @@
  *                                                                         *
  ***************************************************************************/
 
-// One-character debug console on USB-Serial/JTAG.
+// The one-character debug console.
+//
+// USB-Serial/JTAG on the board, stdin/stdout in the simulator -- the bytes go
+// through platform::Console*(), so the protocol below is the same on both and
+// the run skill's driver.py drives either.
 //
 // Commands (send a single byte, no newline needed):
 //
@@ -34,17 +38,11 @@
 
 #include "AppModel.h"
 #include "AppOptions.h"
-#include "CanPortEsp.h"
+#include "CanPort.h"
 #include "CanProcessor.h"
+#include "Platform.h"
 #include "StorageOptions.h"
 #include "VectorScene.h"
-
-#include "driver/usb_serial_jtag.h"
-#include "driver/usb_serial_jtag_vfs.h"
-#include "esp_heap_caps.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include <cstdio>
 #include <cstring>
@@ -54,19 +52,11 @@ namespace {
 constexpr const char* TAG = "console";
 
 constexpr int CONSOLE_TASK_STACK = 32768; // LVGL draw calls happen on this task
-constexpr int USB_RX_BUF			= 1024;
-constexpr int USB_TX_BUF			= 4096;
 constexpr int B64_LINE_LEN			= 76; // must stay a multiple of 4
 
 void WriteAll(const uint8_t* data, size_t len)
 {
-	while(len > 0) {
-		const int n = usb_serial_jtag_write_bytes(data, len, pdMS_TO_TICKS(2000));
-		if(n <= 0)
-			return;
-		data += n;
-		len -= static_cast<size_t>(n);
-	}
+	platform::ConsoleWrite(data, len);
 }
 
 void WriteStr(const char* s)
@@ -161,15 +151,20 @@ void PrintStats()
 	// Model fields prove the processing loop is actually ticking: rpm comes
 	// from the NOD, eng/moving from ModelBase's above/below detectors.
 	const app::Model*			 pModel	= app::GetModel();
-	const app::CanPortEsp*	 pPort	= app::GetCanPort();
+	const app::CanPort*		 pPort	= app::GetCanPort();
 	const app::CanProcessor* pProc	= app::GetCanProcessor();
 	const int					 iRpm		= pModel ? static_cast<int>(pModel->GetEngineRPM() + 0.5f) : -1;
 	const int					 iEng		= pModel ? (pModel->IsEngineRunning() ? 1 : 0) : -1;
 	const int					 iMoving = pModel ? (pModel->IsMoving() ? 1 : 0) : -1;
 
-	// nvs_opt is how many option blobs came back at boot; a fresh flash reads
+	// nvs_opt is how many option blobs came back at boot; a fresh store reads
 	// 0 and writes the defaults, every boot after that reads them all.
-	const app::Settings::Usage use = app::GetSettings().GetUsage();
+	const app::Settings::Usage use	= app::GetSettings().GetUsage();
+	const bool						bOpen = app::GetSettings().IsOpen();
+
+	// Zeros in the simulator, which has none of the board's memory limits --
+	// see port/pc/PlatformSim.cpp.
+	const platform::HeapStats heap = platform::GetHeapStats();
 
 	std::snprintf(
 		line,
@@ -181,13 +176,13 @@ void PrintStats()
 		demo::SceneName(),
 		tenths / 10,
 		tenths % 10,
-		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-		static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+		static_cast<unsigned>(heap.uFreeInternal),
+		static_cast<unsigned>(heap.uFreePsram),
 		iRpm,
 		iEng,
 		iMoving,
 		static_cast<unsigned>(app::ModelStackHeadroom()),
-		pPort ? app::CanPortEsp::ModeName(pPort->GetMode()) : "off",
+		pPort ? app::CanPort::ModeName(pPort->GetMode()) : "off",
 		static_cast<unsigned>(pPort ? pPort->GetRxCount() : 0),
 		static_cast<unsigned>(pPort ? pPort->GetTxCount() : 0),
 		static_cast<unsigned>(pProc ? pProc->GetNodCount() : 0),
@@ -195,14 +190,14 @@ void PrintStats()
 		pProc ? pProc->GetIdentifiedUnitCount() : -1,
 		static_cast<unsigned>(pPort ? pPort->GetErrCount() : 0),
 		static_cast<unsigned>(pPort ? pPort->GetBusState() : 0),
-		use.uTotal ? "open" : "off",
+		bOpen ? "open" : "off",
 		static_cast<unsigned>(app::OptionsLoaded()),
 		static_cast<unsigned>(use.uUsed),
 		static_cast<unsigned>(use.uTotal),
 						// Low-water mark since boot. heap_int is a snapshot taken at
 						// a random point in a ThorVG frame and swings by tens of kB;
 						// this is the figure that says whether the margin is real.
-		static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+		static_cast<unsigned>(heap.uMinFreeInternal),
 		static_cast<unsigned>(app::ParameterPushCount())
 	);
 	WriteStr(line);
@@ -251,8 +246,8 @@ void PushParameter()
 	// then the commit, then the apply on the LVGL task. Wait for the services
 	// to go idle rather than guessing at a delay.
 	for(int i = 0; i < 60 && app::IsPushActive(); ++i)
-		vTaskDelay(pdMS_TO_TICKS(50));
-	vTaskDelay(pdMS_TO_TICKS(200));	  // and one more scene tick for the apply
+		platform::SleepMs(50);
+	platform::SleepMs(200); // and one more scene tick for the apply
 
 	char line[96];
 	std::snprintf(
@@ -271,12 +266,13 @@ void Screenshot(int step)
 	int32_t		 w = 0;
 	int32_t		 h = 0;
 
-	// ESP_LOG writes go to the same USB endpoint as the base64 body. Any log
+	// On the board the log and the base64 body share one USB endpoint, so any
 	// line emitted mid-capture -- by us, by LVGL, by the adapter -- lands in
 	// the middle of a base64 line and corrupts the image beyond recovery on
 	// the host. Silence logging for the duration; the frame markers below are
-	// written directly, so they are unaffected.
-	esp_log_level_set("*", ESP_LOG_NONE);
+	// written directly, so they are unaffected. In the simulator the two are
+	// separate streams and this costs nothing.
+	platform::SetLogLevel(platform::LogLevel::None);
 
 	char header[96];
 	std::snprintf(header, sizeof(header), "<<<SHOT step=%d fmt=rgb888>>>\n", step);
@@ -291,7 +287,7 @@ void Screenshot(int step)
 	);
 	WriteStr(footer);
 
-	esp_log_level_set("*", ESP_LOG_INFO);
+	platform::SetLogLevel(platform::LogLevel::Info);
 }
 
 void Help()
@@ -303,10 +299,15 @@ void ConsoleTask(void*)
 {
 	WriteStr("<<<CONSOLE ready>>>\n");
 	for(;;) {
-		uint8_t	 c = 0;
-		const int n = usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY);
-		if(n != 1)
+		uint8_t		 c = 0;
+		const size_t n = platform::ConsoleRead(&c, 1);
+		if(n != 1) {
+			// End of stream. On the board that cannot happen -- the driver
+			// blocks forever -- but a simulator run from a pipe ends when the
+			// host closes it, and spinning on a dead stream would burn a core.
+			platform::SleepMs(50);
 			continue;
+		}
 		switch(c) {
 		case 'h': Help(); break;
 		case 'i': PrintStats(); break;
@@ -331,34 +332,19 @@ namespace demo {
 
 void StartSerialConsole()
 {
-	usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
-	cfg.rx_buffer_size						= USB_RX_BUF;
-	cfg.tx_buffer_size						= USB_TX_BUF;
-
-	const esp_err_t err = usb_serial_jtag_driver_install(&cfg);
-	if(err != ESP_OK) {
-		ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: 0x%x", err);
+	if(platform::ConsoleOpen() == false) {
+		APP_LOGE(TAG, "no host link; the console will not run");
 		return;
 	}
-	// Route printf()/ESP_LOG through the driver so log output and console
-	// output cannot interleave mid-byte.
-	usb_serial_jtag_vfs_use_driver();
 
-	// Checked, because a silent failure here looks exactly like a dead board:
-	// no <<<CONSOLE ready>>>, no error, and the driver on the host reports
-	// only that it got nothing back. The stack is large because
-	// lv_snapshot_take() draws on the calling thread, and 32 kB has to be
-	// *contiguous* -- if this ever fails, something mounted or allocated ahead
-	// of it fragmented internal RAM.
-	if(xTaskCreate(ConsoleTask, "console", CONSOLE_TASK_STACK, nullptr, 4, nullptr) != pdPASS) {
-		ESP_LOGE(
-			TAG,
-			"could not create the console task (%u B stack); "
-			"largest free internal block is %u B",
-			static_cast<unsigned>(CONSOLE_TASK_STACK),
-			static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL))
-		);
-	}
+	// The stack is large because lv_snapshot_take() draws on the calling
+	// thread, and on the board 32 kB of it has to be *contiguous* -- if this
+	// ever fails, something mounted or allocated ahead of it fragmented
+	// internal RAM. StartTask() reports that itself, which matters: a silent
+	// failure here looks exactly like a dead board, with no <<<CONSOLE ready>>>
+	// and nothing on the host to say why.
+	const platform::TaskConfig cfg{"console", CONSOLE_TASK_STACK, 4};
+	platform::StartTask(cfg, ConsoleTask, nullptr);
 }
 
 } // namespace demo

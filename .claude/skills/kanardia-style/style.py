@@ -4,10 +4,10 @@ Kanardia house style for this project's own C++.
 
   style.py check  [paths...]   report what is off, change nothing
   style.py format [paths...]   banner, plain // comments, clang-format
-  style.py new <Name> [-n ns]  scaffold main/<Name>.h and main/<Name>.cpp
+  style.py new <Name> [-n ns]  scaffold src/<Name>.h and src/<Name>.cpp
 
-With no paths, acts on main/*.cpp and main/*.h. Never touch managed_components
-or the shared Kanardia tree -- both carry their own style.
+With no paths, acts on src/, port/esp/ and port/pc/. Never touch
+managed_components or the shared Kanardia tree -- both carry their own style.
 """
 
 import argparse
@@ -20,8 +20,14 @@ import sys
 
 ROOT        = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 CLANG       = 'clang-format-20'
-DEFAULT     = ['main/*.cpp', 'main/*.h']
+DEFAULT     = ['src/*.cpp', 'src/*.h',
+               'port/esp/*.cpp', 'port/esp/*.h',
+               'port/pc/*.cpp', 'port/pc/*.h']
 BANNER_MARK = 'Kanardia d.o.o.'
+# Ours by location, not by authorship: port/pc/lv_conf.h is LVGL's own
+# lv_conf_template.h with a handful of values changed, and is kept in LVGL's
+# style so that upgrading LVGL stays a re-copy and a diff.
+VENDORED    = ['port/pc/lv_conf.h']
 
 BANNER = """\
 /***************************************************************************
@@ -239,12 +245,18 @@ def converge(paths, rounds=4):
 # ---------------------------------------------------------------------------
 
 def expand(patterns):
+    # A default pattern that matches nothing is a directory this build does not
+    # carry yet, not a mistake; one the caller typed out is.
+    given = bool(patterns)
     paths = []
     for pat in patterns or DEFAULT:
         hits = sorted(glob.glob(pat, root_dir=ROOT)) or ([pat] if os.path.exists(os.path.join(ROOT, pat)) else [])
         if not hits:
-            sys.exit('no such file: ' + pat)
+            if given:
+                sys.exit('no such file: ' + pat)
+            continue
         paths += hits
+    paths = [p for p in paths if p not in VENDORED]
     bad = [p for p in paths if p.startswith(('managed_components/', 'build/'))]
     if bad:
         sys.exit('refusing to reformat third-party code: ' + ', '.join(bad))
@@ -338,10 +350,10 @@ namespace %(ns)s {
 '''
 
 
-def cmd_new(name, ns):
+def cmd_new(name, ns, where='src'):
     made = []
     for tmpl, ext in ((HEADER, '.h'), (SOURCE, '.cpp')):
-        path = os.path.join('main', name + ext)
+        path = os.path.join(where, name + ext)
         full = os.path.join(ROOT, path)
         if os.path.exists(full):
             print('exists, left alone:', path)
@@ -352,7 +364,7 @@ def cmd_new(name, ns):
     if made:
         converge(made)
         print('created:', ', '.join(made))
-        print('remember: add the .cpp to SRCS in main/CMakeLists.txt')
+        print('remember: add the .cpp to the source list in cmake/KanardiaSources.cmake')
     return 0
 
 
@@ -365,12 +377,13 @@ def main():
     s = sub.add_parser('new')
     s.add_argument('name')
     s.add_argument('-n', '--namespace', default='app')
+    s.add_argument('-d', '--dir', default='src', help='src, port/esp or port/pc')
     a = ap.parse_args()
 
     if subprocess.run(['which', CLANG], capture_output=True).returncode != 0:
         sys.exit(CLANG + ' not found: sudo apt install clang-format-20')
     if a.cmd == 'new':
-        return cmd_new(a.name, a.namespace)
+        return cmd_new(a.name, a.namespace, a.dir)
     return (cmd_check if a.cmd == 'check' else cmd_format)(a.paths)
 
 

@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Driver for the ESP32-P4 LVGL + ThorVG demo.
+Driver for the ESP32-P4 LVGL + ThorVG demo, on the board or in the simulator.
 
-Builds, flashes and then *drives* the running firmware over its USB-Serial/JTAG
-debug console (see main/SerialConsole.cpp), including pulling a real
-screenshot off the panel and decoding it to PNG.
+Builds, flashes and then *drives* the running firmware over its one-character
+debug console (see src/SerialConsole.cpp), including pulling a real screenshot
+off the panel and decoding it to PNG.
 
-Run from the project root:
+The same console is on USB-Serial/JTAG on the board and on stdin/stdout in the
+desktop simulator, so every command below takes --sim and means the same thing:
 
     python3 .claude/skills/run-espp4/driver.py smoke
+    python3 .claude/skills/run-espp4/driver.py --sim smoke
+    python3 .claude/skills/run-espp4/driver.py --sim shot --scene ias --out ias.png
+
+--sim starts ./build-sim/espp4-sim, drives it, and stops it again. It needs a
+display -- it is a real SDL window -- and `--sim build` is how it gets built.
 
 Needs pyserial, which ships inside the ESP-IDF virtualenv. If this script is
 started with a python that lacks it, it re-execs itself with the IDF venv
@@ -22,15 +28,19 @@ import base64
 import glob
 import os
 import re
+import select
 import struct
 import subprocess
 import sys
+import threading
 import time
 import zlib
 
 PROJECT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
+SIM_BUILD_DIR = os.path.join(PROJECT, "build-sim")
+SIM_EXE = os.path.join(SIM_BUILD_DIR, "espp4-sim")
 
 # --------------------------------------------------------------------------
 # Bootstrap: find pyserial (IDF venv) and idf.py
@@ -118,6 +128,102 @@ def open_port(port, baud=DEFAULT_BAUD, settle=3.0, quiet=False):
     return s
 
 
+class SimLink:
+    """
+    The simulator, spoken to as if it were the serial port.
+
+    Only the handful of pyserial members the commands below use: read(),
+    write(), flush(), close(), reset_input_buffer(), and dtr/rts, which are
+    meaningless here and are accepted and ignored.
+
+    The simulator keeps its console protocol on stdout and its log on stderr
+    (see port/pc/PlatformSim.cpp), which is the opposite of the board, where
+    both share the one USB endpoint. read() therefore returns the protocol
+    stream only, and log_text() hands back what has arrived on the log so far
+    -- which is where the boot markers the smoke test looks for live.
+    """
+
+    dtr = False
+    rts = False
+
+    def __init__(self, args, settle=1.5, quiet=False):
+        if not os.path.exists(SIM_EXE):
+            sys.exit("%s not built. Run:\n"
+                     "  python3 .claude/skills/run-espp4/driver.py --sim build" % SIM_EXE)
+        self.proc = subprocess.Popen(
+            [SIM_EXE] + list(args),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=PROJECT)
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        self._log = bytearray()
+        self._thread = threading.Thread(target=self._drain_log, daemon=True)
+        self._thread.start()
+        if settle:
+            if not quiet:
+                print("waiting %.1fs for the simulator to come up..." % settle, file=sys.stderr)
+            time.sleep(settle)
+            # As open_port() does after the reset it causes: leave no banner in
+            # the pipe. "<<<CONSOLE ready>>>" ends in ">>>\n", which is the
+            # marker a stats request waits for, so an unread one would satisfy
+            # the next command before its answer had been written.
+            self.reset_input_buffer()
+
+    def _drain_log(self):
+        # read1(), not read(): a BufferedReader's read(n) blocks until it has n
+        # bytes or the pipe closes, which would hold the whole boot log back
+        # until the simulator exits.
+        for chunk in iter(lambda: self.proc.stderr.read1(4096), b""):
+            self._log += chunk
+
+    def log_text(self):
+        return bytes(self._log).decode("utf-8", "replace")
+
+    def read(self, n=65536):
+        r, _, _ = select.select([self.proc.stdout], [], [], 1.0)
+        if not r:
+            return b""
+        return self.proc.stdout.read(n) or b""
+
+    def write(self, data):
+        self.proc.stdin.write(data)
+
+    def flush(self):
+        self.proc.stdin.flush()
+
+    def reset_input_buffer(self):
+        while self.read():
+            pass
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+
+def open_link(a, settle=None, quiet=False):
+    """The console, whichever build this invocation is driving."""
+    settle = a.settle if settle is None else settle
+    if a.sim:
+        sim_args = []
+        if a.can:
+            sim_args += ["--can", a.can]
+        if a.state:
+            sim_args += ["--state", a.state]
+        # settle=0 means "leave the stream alone": the caller is about to read
+        # the boot log and the banner, which is exactly what the drain below
+        # would swallow. That is how smoke works on both builds.
+        return SimLink(sim_args, settle=settle, quiet=quiet)
+    return open_port(a.port, settle=settle, quiet=quiet)
+
+
+def link_log(s):
+    """The board keeps its log in the console stream; the simulator does not."""
+    return s.log_text() if isinstance(s, SimLink) else ""
+
+
 def read_until(s, marker, timeout):
     buf = b""
     t0 = time.time()
@@ -194,16 +300,33 @@ def decode_shot(buf, out_path):
 # --------------------------------------------------------------------------
 
 
+def run_cmake(args):
+    """Configure if needed, then build the simulator."""
+    if not os.path.exists(os.path.join(SIM_BUILD_DIR, "build.ninja")):
+        rc = subprocess.call(
+            ["cmake", "-S", os.path.join(PROJECT, "port", "pc"), "-B", SIM_BUILD_DIR, "-G", "Ninja"],
+            cwd=PROJECT)
+        if rc:
+            return rc
+    return subprocess.call(["cmake", "--build", SIM_BUILD_DIR] + list(args), cwd=PROJECT)
+
+
 def cmd_build(a):
+    if a.sim:
+        return run_cmake([])
     return run_idf(["build"])
 
 
 def cmd_flash(a):
+    if a.sim:
+        print("nothing to flash: --sim runs the simulator straight out of "
+              "build-sim/espp4-sim", file=sys.stderr)
+        return 1
     return run_idf(["-p", a.port, "flash"])
 
 
 def cmd_stats(a):
-    s = open_port(a.port, settle=a.settle)
+    s = open_link(a)
     buf, _ = command(s, b"i", b">>>\n", 5)
     s.close()
     line = [l for l in buf.decode("utf-8", "replace").splitlines() if l.startswith("<<<STATS")]
@@ -215,7 +338,7 @@ def cmd_stats(a):
 
 
 def cmd_toggle(a):
-    s = open_port(a.port, settle=a.settle)
+    s = open_link(a)
     buf, _ = command(s, b"t", b"<<<STATS", 5)
     s.close()
     for l in buf.decode("utf-8", "replace").splitlines():
@@ -250,7 +373,7 @@ def select_scene(s, want):
 
 
 def cmd_shot(a):
-    s = open_port(a.port, settle=a.settle)
+    s = open_link(a)
     if a.scene:
         got = select_scene(s, a.scene)
         if got != a.scene:
@@ -279,6 +402,17 @@ BOOT_MARKERS = [
     ("canvas 400x400 ARGB8888 ready", "scene built"),
     ("<<<CONSOLE ready>>>", "debug console"),
 ]
+
+# The simulator has no panel driver and no touch controller; what it does have
+# is the same scene, the same console and a CAN port that falls back to
+# self-test when no adapter is plugged in.
+SIM_MARKERS = [
+    ("panel 720x720", "main reached"),
+    ("canvas 400x400 ARGB8888 ready", "scene built"),
+    ("CAN up:", "CAN port"),
+    ("model loop running", "model loop"),
+    ("<<<CONSOLE ready>>>", "debug console"),
+]
 # NOT "rst:0x" -- the ROM prints rst:0x1 (POWERON) on every healthy boot.
 # These are the strings that only appear when something actually went wrong.
 PANIC_MARKERS = [
@@ -294,17 +428,36 @@ PANIC_MARKERS = [
 
 
 def cmd_smoke(a):
-    s = open_port(a.port, settle=0, quiet=True)
-    # Force a clean reset so we capture the whole boot log.
+    s = open_link(a, settle=0, quiet=True)
+    # Force a clean reset so we capture the whole boot log. On the simulator
+    # the process has only just started, so there is nothing to reset.
     s.dtr = False
     s.rts = True
     time.sleep(0.15)
     s.rts = False
     boot, _ = read_until(s, READY, 20)
-    text = boot.decode("utf-8", "replace")
+    # The board interleaves its log with the console protocol; the simulator
+    # keeps them apart, so both halves have to be looked at.
+    markers = SIM_MARKERS if a.sim else BOOT_MARKERS
+
+    def boot_text():
+        return boot.decode("utf-8", "replace") + link_log(s)
+
+    # The banner is not the end of the boot in the simulator: the console
+    # starts before the model does, and its log is a stream of its own, so
+    # <<<CONSOLE ready>>> can arrive before the scene is even built. Give the
+    # rest of it a few seconds to show up rather than failing on a race.
+    if a.sim:
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if all(needle in boot_text() for needle, _ in markers):
+                break
+            time.sleep(0.2)
+
+    text = boot_text()
 
     failures = []
-    for needle, what in BOOT_MARKERS:
+    for needle, what in markers:
         ok = needle in text
         print("[%s] %-24s (%s)" % ("ok" if ok else "FAIL", what, needle))
         if not ok:
@@ -349,14 +502,21 @@ def cmd_smoke(a):
 
 
 def cmd_monitor(a):
-    s = open_port(a.port, settle=0, quiet=True)
+    s = open_link(a, settle=0, quiet=True)
     t0 = time.time()
+    seen = 0
     try:
         while time.time() - t0 < a.secs:
             c = s.read(4096)
             if c:
                 sys.stdout.write(c.decode("utf-8", "replace"))
                 sys.stdout.flush()
+            # The simulator's log is a stream of its own; print what is new.
+            text = link_log(s)
+            if len(text) > seen:
+                sys.stdout.write(text[seen:])
+                sys.stdout.flush()
+                seen = len(text)
     except KeyboardInterrupt:
         pass
     s.close()
@@ -369,6 +529,10 @@ def main():
     p.add_argument("--port", default=DEFAULT_PORT)
     p.add_argument("--settle", type=float, default=3.0,
                    help="seconds to wait after the open-induced reset")
+    p.add_argument("--sim", action="store_true",
+                   help="drive build-sim/espp4-sim instead of the board")
+    p.add_argument("--can", help="--sim only: serial device of a CANU adapter")
+    p.add_argument("--state", help="--sim only: directory for the stored settings")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("build").set_defaults(fn=cmd_build)

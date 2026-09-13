@@ -30,55 +30,40 @@
 
 #include "KanardiaCommon.h"
 
-#include "CanPort/AbstractCanPort.h"
+#include "CanPort.h"
 
 #include "driver/gpio.h"
 #include "driver/twai.h"
 
-#include <atomic>
-
 namespace app {
 
-class CanPortEsp : public can::AbstractCanPort
+class CanPortEsp : public CanPort
 {
 public:
-	enum class Mode
-	{
-		Normal,	  // real bus: needs a transceiver and at least one other node
-		Listen,	  // receive only, never acknowledge, never transmit
-		SelfTest,	 // no acknowledge needed and own frames come back
-	};
-
-	struct Config
-	{
-		gpio_num_t eTx				= GPIO_NUM_30;
-		gpio_num_t eRx				= GPIO_NUM_31;
-		uint32_t	  uBitrateKbps = 500;
-		Mode		  eMode			= Mode::Normal;
-	};
+	// The pins the transceiver is wired to. Not in CanPort::Config, which is
+	// what both builds share and a desktop has no use for.
+	static constexpr gpio_num_t PIN_TX = GPIO_NUM_30;
+	static constexpr gpio_num_t PIN_RX = GPIO_NUM_31;
 
 	CanPortEsp(FuncProcessMsg&& fProcMsg, const Config& cfg);
 	~CanPortEsp() override;
 
+	// --- app::CanPort ----------------------------------------------------
+
 	// Install and start the driver, then the receive thread.
-	bool Start();
+	bool Start() override;
 	// Stop the receive thread and uninstall the driver.
-	void Stop();
+	void Stop() override;
 
 	bool Send(const can::Message& msg) override;
 	bool IsSpaceFor(uint32_t uMessages) const override;
 
-	uint32_t GetRxCount() const { return m_uRx; }
-	uint32_t GetTxCount() const { return m_uTx; }
-	uint32_t GetErrCount() const { return m_uErr; }
+	Mode GetMode() const override { return m_cfg.eMode; }
 
 	// Bus-off, error-passive and friends, straight from the controller.
-	uint32_t GetBusState() const;
+	uint32_t GetBusState() const override;
 
-	Mode			  GetMode() const { return m_cfg.eMode; }
 	const Config& GetConfig() const { return m_cfg; }
-
-	static const char* ModeName(Mode eMode);
 
 protected:
 	void Loop(std::stop_token st) override;
@@ -87,11 +72,10 @@ private:
 	static can::Message	 FromTwai(const twai_message_t& tm);
 	static twai_message_t ToTwai(const can::Message& msg);
 
-	Config					 m_cfg;
-	bool						 m_bRunning = false;
-	std::atomic<uint32_t> m_uRx{0};
-	std::atomic<uint32_t> m_uTx{0};
-	std::atomic<uint32_t> m_uErr{0};
+	Config	  m_cfg;
+	gpio_num_t m_eTx		 = PIN_TX;
+	gpio_num_t m_eRx		 = PIN_RX;
+	bool		  m_bRunning = false;
 };
 
 } // namespace app
