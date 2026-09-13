@@ -32,13 +32,10 @@ VENDORED    = ['port/pc/lv_conf.h']
 BANNER = """\
 /***************************************************************************
  *                                                                         *
- *   Copyright (C) 2019 by Kanardia d.o.o. [see www.kanardia.eu]           *
- *   Writen by:                                                            *
- *      Rok Markovic [rok.markovic@kanardia.eu]                            *
+ *   Copyright (C) 2026 by Kanardia d.o.o. [see www.kanardia.eu]           *
  *                                                                         *
- *   Status: Open Source                                                   *
- *                                                                         *
- *   License: GPL - GNU General Public License                             *
+ *   License:                                                              *
+ *      Proprietary - All rights reserved                                  *
  *                                                                         *
  ***************************************************************************/"""
 
@@ -163,9 +160,30 @@ def undox(src):
 # banner and the clang-format tab quirk
 # ---------------------------------------------------------------------------
 
+def banner_span(src):
+    """Where the file's leading /* ... */ banner sits, or None if it has none."""
+    i = 0
+    while i < len(src) and src[i] in ' \t\r\n':
+        i += 1
+    if not src.startswith('/*', i):
+        return None
+    e = src.find('*/', i + 2)
+    if e < 0:
+        return None
+    e += 2
+    return (i, e) if BANNER_MARK in src[i:e] else None
+
+
 def add_banner(src):
-    if BANNER_MARK in src[:len(BANNER) + 200]:
-        return src
+    """
+    Give the file the current banner. A file carrying an older one -- a 2019
+    GPL header, or something pasted in from another Kanardia tree -- has it
+    replaced rather than doubled up.
+    """
+    span = banner_span(src)
+    if span:
+        b, e = span
+        return src if src[b:e] == BANNER else src[:b] + BANNER + src[e:]
     body = src.lstrip('\n')
     m    = re.match(r'(#pragma once\n)\s*', body)   # keep it right under the banner
     if m:
@@ -292,8 +310,11 @@ def cmd_check(paths):
     for p in paths:
         full, src, out = rewrite(p)
         why = []
-        if BANNER_MARK not in src[:len(BANNER) + 200]:
+        span = banner_span(src)
+        if span is None:
             why.append('no copyright banner')
+        elif src[span[0]:span[1]] != BANNER:
+            why.append('outdated copyright banner')
         if p.endswith('.h') and not re.search(r'(?m)^#pragma once$', src):
             why.append('no #pragma once')
         if GUARD.search(src):

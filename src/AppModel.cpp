@@ -1,12 +1,9 @@
 /***************************************************************************
  *                                                                         *
- *   Copyright (C) 2019 by Kanardia d.o.o. [see www.kanardia.eu]           *
- *   Writen by:                                                            *
- *      Rok Markovic [rok.markovic@kanardia.eu]                            *
+ *   Copyright (C) 2026 by Kanardia d.o.o. [see www.kanardia.eu]           *
  *                                                                         *
- *   Status: Open Source                                                   *
- *                                                                         *
- *   License: GPL - GNU General Public License                             *
+ *   License:                                                              *
+ *      Proprietary - All rights reserved                                  *
  *                                                                         *
  ***************************************************************************/
 

@@ -33,20 +33,19 @@ anything else:
 ```c
 /***************************************************************************
  *                                                                         *
- *   Copyright (C) 2019 by Kanardia d.o.o. [see www.kanardia.eu]           *
- *   Writen by:                                                            *
- *      Rok Markovic [rok.markovic@kanardia.eu]                            *
+ *   Copyright (C) 2026 by Kanardia d.o.o. [see www.kanardia.eu]           *
  *                                                                         *
- *   Status: Open Source                                                   *
- *                                                                         *
- *   License: GPL - GNU General Public License                             *
+ *   License:                                                              *
+ *      Proprietary - All rights reserved                                  *
  *                                                                         *
  ***************************************************************************/
 ```
 
-The typo in "Writen" is in the original and stays. This is the one `/* */`
-block in the project; it is matched by the literal `Kanardia d.o.o.` and the
-tooling skips it.
+This is the one `/* */` block in the project; it is matched by the literal
+`Kanardia d.o.o.`, which is what lets `format` recognise an older banner -- a
+2019 GPL header, or one pasted in from another Kanardia tree -- and replace it
+rather than add a second one. `check` reports that as `outdated copyright
+banner`.
 
 **2. Headers are guarded with `#pragma once`**, directly under the banner,
 never with `#ifndef`/`#define`. `format` deletes an include guard it finds --

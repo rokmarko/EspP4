@@ -22,6 +22,10 @@ compile_commands.json
 *.swp
 *~
 
+# Screenshots the run skill and the VS Code tasks drop in the project root.
+panel.png
+sim.png
+
 # --- Serial / debug artefacts ---
 *.core
 core.*
