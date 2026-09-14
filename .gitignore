@@ -15,7 +15,6 @@ managed_components/
 dependencies.lock
 
 # --- Editors / tooling ---
-.vscode/
 .idea/
 .cache/
 compile_commands.json

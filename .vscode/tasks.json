@@ -1,0 +1,258 @@
+// Tasks for the two builds this project carries: the ESP32-P4 firmware and the
+// desktop simulator. See CLAUDE.md for what each command does and why.
+//
+// Everything runs through `bash -lc`, because the IDF tasks have to source
+// export.sh first -- it is not on PATH -- and a login shell is also what makes
+// npm reachable for the font converter. The IDF location honours $IDF_PATH and
+// falls back to the checkout CLAUDE.md documents.
+//
+// Ctrl+Shift+B is "Sim: build": it needs no board, no IDF and about a second.
+//
+// The compiler problem matcher is written out per task rather than using the
+// built-in $gcc: both builds compile the shared Public/Common tree through
+// absolute paths, and $gcc resolves what it matches against ${workspaceFolder},
+// which puts every Common diagnostic on a file that does not exist.
+{
+	"version": "2.0.0",
+
+	"options": {
+		"cwd": "${workspaceFolder}",
+		"shell": {
+			"executable": "bash",
+			"args": ["-lc"]
+		}
+	},
+
+	"presentation": {
+		"echo": true,
+		"reveal": "always",
+		"panel": "shared",
+		"showReuseMessage": false,
+		"clear": true
+	},
+
+	"tasks": [
+		// -------------------------------------------------------------
+		//  The board
+		// -------------------------------------------------------------
+		{
+			"label": "Board: build",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py build",
+			"group": "build",
+			"problemMatcher": {
+				"owner": "cpp",
+				"source": "gcc",
+				"fileLocation": "autoDetect",
+				"pattern": {
+					"regexp": "^(.*?):(\\d+):(\\d+):\\s+(?:fatal\\s+)?(warning|error|note):\\s+(.*)$",
+					"file": 1,
+					"line": 2,
+					"column": 3,
+					"severity": 4,
+					"message": 5
+				}
+			}
+		},
+		{
+			"label": "Board: flash + monitor",
+			"detail": "Full flash, then the serial monitor. Ctrl+] exits.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py -p /dev/ttyACM0 flash monitor",
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Board: app-flash + monitor",
+			"detail": "App partition only -- the fast iteration loop. Ctrl+] exits.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py -p /dev/ttyACM0 app-flash monitor",
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Board: monitor",
+			"detail": "Serial monitor alone. Holds the port, so driver.py cannot run at the same time.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py -p /dev/ttyACM0 monitor",
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Board: menuconfig",
+			"detail": "Inspect the effective configuration. Edits land in sdkconfig, not sdkconfig.defaults.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py menuconfig",
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Board: re-apply sdkconfig.defaults",
+			"detail": "Defaults are only consumed when sdkconfig does not exist, so delete it, rebuild, and check what landed.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && rm -f sdkconfig && idf.py build && grep -E '^CONFIG_(SPIRAM_SPEED|LV_USE_THORVG|LV_DRAW)' sdkconfig",
+			"problemMatcher": []
+		},
+		{
+			"label": "Board: fullclean",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py fullclean",
+			"problemMatcher": []
+		},
+		{
+			"label": "Board: reconfigure (re-resolve components)",
+			"detail": "Repopulates managed_components/ from main/idf_component.yml -- which is also where the simulator prefers to get LVGL.",
+			"type": "shell",
+			"command": "if [ -z \"$IDF_PATH\" ]; then IDF_PATH=$HOME/esp/v5.5.1/esp-idf; fi; . \"$IDF_PATH/export.sh\" >/dev/null && idf.py reconfigure",
+			"problemMatcher": []
+		},
+		{
+			"label": "Board: smoke",
+			"detail": "Reset, check the boot markers, prove the UI is live. Exit 0 or 1.",
+			"type": "shell",
+			"command": "python3 .claude/skills/run-espp4/driver.py smoke",
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
+			"label": "Board: screenshot",
+			"detail": "Real PNG off the panel, in the scene you pick.",
+			"type": "shell",
+			"command": "python3 .claude/skills/run-espp4/driver.py shot --scene ${input:scene} --out ${workspaceFolder}/panel.png && code -r ${workspaceFolder}/panel.png",
+			"problemMatcher": []
+		},
+
+		// -------------------------------------------------------------
+		//  The simulator
+		// -------------------------------------------------------------
+		{
+			"label": "Sim: configure",
+			"detail": "cmake -S port/pc -B build-sim. Idempotent, so the build task just runs it every time.",
+			"type": "shell",
+			"command": "cmake -S port/pc -B build-sim -G Ninja",
+			"problemMatcher": []
+		},
+		{
+			"label": "Sim: build",
+			"type": "shell",
+			"command": "cmake --build build-sim",
+			"dependsOn": ["Sim: configure"],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": {
+				"owner": "cpp",
+				"source": "gcc",
+				"fileLocation": "autoDetect",
+				"pattern": {
+					"regexp": "^(.*?):(\\d+):(\\d+):\\s+(?:fatal\\s+)?(warning|error|note):\\s+(.*)$",
+					"file": 1,
+					"line": 2,
+					"column": 3,
+					"severity": 4,
+					"message": 5
+				}
+			}
+		},
+		{
+			"label": "Sim: run",
+			"detail": "Opens the SDL window. The one-character console is on this terminal's stdin: h, i, t, s.",
+			"type": "shell",
+			"command": "./build-sim/espp4-sim",
+			"dependsOn": ["Sim: build"],
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Sim: run (CANU adapter)",
+			"detail": "Same, against a real Kanardia CANU adapter instead of the software loopback.",
+			"type": "shell",
+			"command": "./build-sim/espp4-sim --can /dev/ttyUSB0",
+			"dependsOn": ["Sim: build"],
+			"problemMatcher": [],
+			"presentation": { "panel": "dedicated" }
+		},
+		{
+			"label": "Sim: smoke",
+			"detail": "The same smoke test as the board's, against a settings store of its own.",
+			"type": "shell",
+			"command": "python3 .claude/skills/run-espp4/driver.py --sim --state ${workspaceFolder}/build-sim/state smoke",
+			"dependsOn": ["Sim: build"],
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Sim: screenshot",
+			"detail": "Starts the simulator, captures the scene you pick, stops it again.",
+			"type": "shell",
+			"command": "python3 .claude/skills/run-espp4/driver.py --sim --state ${workspaceFolder}/build-sim/state shot --scene ${input:scene} --out ${workspaceFolder}/sim.png && code -r ${workspaceFolder}/sim.png",
+			"dependsOn": ["Sim: build"],
+			"problemMatcher": []
+		},
+		{
+			"label": "Sim: build (clean settings)",
+			"detail": "Builds, then drops the debugger's own settings store so the next run takes the first-boot path.",
+			"type": "shell",
+			"command": "rm -rf build-sim/state-debug",
+			"dependsOn": ["Sim: build"],
+			"problemMatcher": []
+		},
+		{
+			"label": "Sim: clean",
+			"detail": "Drops build-sim/ entirely, stored settings included.",
+			"type": "shell",
+			"command": "rm -rf build-sim",
+			"problemMatcher": []
+		},
+
+		// -------------------------------------------------------------
+		//  House style and tooling
+		// -------------------------------------------------------------
+		{
+			"label": "Style: check",
+			"detail": "Banner, #pragma once, plain // comments, clang-format. Non-zero if anything is off.",
+			"type": "shell",
+			"command": "python3 .claude/skills/kanardia-style/style.py check",
+			"problemMatcher": {
+				// style.py check prints "<path>   <what is wrong>", one per file.
+				"owner": "kanardia-style",
+				"source": "style.py",
+				"fileLocation": ["relative", "${workspaceFolder}"],
+				"severity": "warning",
+				"pattern": {
+					"regexp": "^((?:src|port)/\\S+)\\s{2,}(.+)$",
+					"file": 1,
+					"message": 2
+				}
+			}
+		},
+		{
+			"label": "Style: format",
+			"detail": "Fixes all of the above across src/ and port/. Idempotent.",
+			"type": "shell",
+			"command": "python3 .claude/skills/kanardia-style/style.py format",
+			"problemMatcher": []
+		},
+		{
+			"label": "Tools: install lv_font_conv",
+			"detail": "One-time. Both builds generate the Kanardia fonts from the TTF with it.",
+			"type": "shell",
+			"command": "npm install --prefix tools lv_font_conv",
+			"problemMatcher": []
+		}
+	],
+
+	"inputs": [
+		{
+			"id": "scene",
+			"type": "pickString",
+			"description": "Which scene to capture",
+			"options": ["gauge", "scale", "ias", "altimeter", "rpm"],
+			"default": "gauge"
+		}
+	]
+}

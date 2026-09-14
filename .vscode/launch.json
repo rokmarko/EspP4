@@ -1,0 +1,113 @@
+// Debugging, for both builds.
+//
+// The simulator is an ordinary Linux process, so it debugs with gdb through
+// the C/C++ extension: breakpoints in src/ are hit by the same code the board
+// runs, which is most of the reason the simulator exists. It is launched in an
+// integrated terminal on purpose -- the one-character debug console is on
+// stdin, so `i`, `t` and `s` work while you are stopped in the debugger.
+//
+// The board needs JTAG, OpenOCD and the Espressif extension; see the comment on
+// that configuration.
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Sim: debug",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build-sim/espp4-sim",
+			"args": [],
+			"cwd": "${workspaceFolder}",
+			"stopAtEntry": false,
+			"environment": [],
+			"externalConsole": false,
+			"console": "integratedTerminal",
+			"MIMode": "gdb",
+			"miDebuggerPath": "/usr/bin/gdb",
+			"preLaunchTask": "Sim: build",
+			"setupCommands": [
+				{
+					"description": "Pretty-print std:: containers",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				},
+				{
+					// ThorVG rasterises on the calling thread here, and LVGL
+					// runs on main() while the model and console have threads
+					// of their own. Stopping every thread on a breakpoint is
+					// what you want; this just makes gdb say so.
+					"description": "Stop all threads on a breakpoint",
+					"text": "-gdb-set scheduler-locking off",
+					"ignoreFailures": true
+				}
+			]
+		},
+		{
+			// Starts from an empty store -- the first-boot path, where the
+			// defaults are written rather than read. The store lives inside
+			// build-sim, so "Sim: clean" takes it with it and a debug run never
+			// touches the one a normal run uses.
+			"name": "Sim: debug (clean settings)",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build-sim/espp4-sim",
+			"args": ["--state", "${workspaceFolder}/build-sim/state-debug"],
+			"cwd": "${workspaceFolder}",
+			"stopAtEntry": false,
+			"environment": [],
+			"externalConsole": false,
+			"console": "integratedTerminal",
+			"MIMode": "gdb",
+			"miDebuggerPath": "/usr/bin/gdb",
+			"preLaunchTask": "Sim: build (clean settings)",
+			"setupCommands": [
+				{
+					"description": "Pretty-print std:: containers",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				}
+			]
+		},
+		{
+			// Against a real bus instead of the software loopback. Without the
+			// adapter plugged in the port falls back to self-test anyway, so
+			// this is safe to pick by mistake.
+			"name": "Sim: debug (CANU adapter)",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build-sim/espp4-sim",
+			"args": ["--can", "/dev/ttyUSB0"],
+			"cwd": "${workspaceFolder}",
+			"stopAtEntry": false,
+			"environment": [],
+			"externalConsole": false,
+			"console": "integratedTerminal",
+			"MIMode": "gdb",
+			"miDebuggerPath": "/usr/bin/gdb",
+			"preLaunchTask": "Sim: build",
+			"setupCommands": [
+				{
+					"description": "Pretty-print std:: containers",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				}
+			]
+		},
+		{
+			// Needs the Espressif IDF extension, OpenOCD from the IDF tools,
+			// and the board on its USB-Serial/JTAG port. Set the board's
+			// OpenOCD configuration once, in this folder's settings.json:
+			//
+			//     "idf.openOcdConfigs": ["board/esp32p4-builtin.cfg"]
+			//
+			// The extension flashes and starts gdb itself; "Board: build" is
+			// only there so the ELF matches what is on the chip.
+			"name": "Board: debug (JTAG)",
+			"type": "espidf",
+			"request": "launch",
+			"mode": "auto",
+			"logLevel": 2,
+			"preLaunchTask": "Board: build"
+		}
+	]
+}
