@@ -399,7 +399,7 @@ BOOT_MARKERS = [
     ("panel 720x720", "app_main reached"),
     ("jd9365", "MIPI-DSI panel driver"),
     ("Touch 0x5d found", "GT911 touch"),
-    ("canvas 400x400 ARGB8888 ready", "scene built"),
+    ("ARGB8888 ready", "scene built"),
     ("<<<CONSOLE ready>>>", "debug console"),
 ]
 
@@ -408,7 +408,7 @@ BOOT_MARKERS = [
 # self-test when no adapter is plugged in.
 SIM_MARKERS = [
     ("panel 720x720", "main reached"),
-    ("canvas 400x400 ARGB8888 ready", "scene built"),
+    ("ARGB8888 ready", "scene built"),
     ("CAN up:", "CAN port"),
     ("model loop running", "model loop"),
     ("<<<CONSOLE ready>>>", "debug console"),
@@ -545,7 +545,7 @@ def main():
     sp.add_argument("--out", default="panel.png")
     sp.add_argument("--full", action="store_true", help="720x720 instead of 360x360")
     sp.add_argument("--timeout", type=float, default=120)
-    sp.add_argument("--scene", choices=["gauge", "scale", "ias", "altimeter", "rpm", "menu"],
+    sp.add_argument("--scene", choices=["gauge", "scale", "ias", "altimeter", "rpm", "panel", "menu"],
                     help="switch to this scene first, verifying via stats")
     sp.set_defaults(fn=cmd_shot)
 

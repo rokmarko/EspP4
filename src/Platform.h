@@ -65,6 +65,13 @@ void Log(LogLevel eLevel, const char* pszTag, const char* pszFmt, ...) __attribu
 // beyond recovery on the host.
 void SetLogLevel(LogLevel eLevel);
 
+// What that level is now.
+//
+// Anything that silences the log for a moment has to put back what it found
+// rather than what it assumes: a build run with debug logging on is exactly
+// the one where a screenshot must not quietly turn it off again.
+LogLevel GetLogLevel();
+
 // --------------------------------------------------------------------------
 //  Time
 // --------------------------------------------------------------------------
@@ -147,6 +154,27 @@ TaskHandle StartTask(const TaskConfig& cfg, void (*pfnEntry)(void*), void* pCtx)
 // Smallest free stack that task has ever had, in bytes. Zero when the port
 // cannot measure it, which is the desktop's answer.
 uint32_t StackHeadroom(TaskHandle hTask);
+
+// --------------------------------------------------------------------------
+//  The network
+// --------------------------------------------------------------------------
+
+// Bring up whatever this build can reach a broker through.
+//
+// On the board that is Wi-Fi over the ESP32-C6 beside the P4 -- see
+// port/esp/WifiEsp.cpp -- and the call returns as soon as the attempt is under
+// way, not when there is an address: the panel has a scene to draw whether or
+// not there is an access point. A desktop's network belongs to the operating
+// system and this answers true having done nothing.
+//
+// Returns false if there is no network to bring up at all.
+bool NetworkStart();
+
+// Enough of a link to open a socket on. False until an address arrives.
+bool IsNetworkUp();
+
+// What the console's `i` line reports: "off", "joining", or the address.
+const char* NetworkStatus();
 
 // --------------------------------------------------------------------------
 //  The host link

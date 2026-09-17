@@ -14,6 +14,17 @@ dependencies:
     version: main
     public: true
 
+  # Wi-Fi, which this chip does not have: the ESP32-P4 reaches the air through
+  # the ESP32-C6 beside it on an SDIO bus. esp_wifi_remote turns the ordinary
+  # esp_wifi_* calls into requests to that companion and esp_hosted carries
+  # them; port/esp/WifiEsp.cpp is written as if the radio were local.
+  #
+  # The versions are the pair Waveshare's own wifistation example for this
+  # board pins for IDF 5.x. Do not float them onto the 6.x line by accident --
+  # that one needs esp_wifi_remote >= 1.6.
+  espressif/esp_wifi_remote: "0.14.*"
+  espressif/esp_hosted: "1.4.*"
+
   # Waveshare BSP for the ESP32-P4-WIFI6-Touch-LCD-3.4C / 4C.
   # Pulls in esp_lcd_jd9365 (MIPI-DSI panel), esp_lcd_touch_gt911 and
   # espressif/esp_lvgl_adapter.

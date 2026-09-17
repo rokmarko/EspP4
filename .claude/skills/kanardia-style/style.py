@@ -21,6 +21,7 @@ import sys
 ROOT        = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 CLANG       = 'clang-format-20'
 DEFAULT     = ['src/*.cpp', 'src/*.h',
+               'src/Item/*.cpp', 'src/Item/*.h',
                'port/esp/*.cpp', 'port/esp/*.h',
                'port/pc/*.cpp', 'port/pc/*.h']
 BANNER_MARK = 'Kanardia d.o.o.'

@@ -3,6 +3,7 @@ build/
 
 # --- Desktop simulator build output (port/pc/CMakeLists.txt) ---
 build-sim/
+build-*/
 sdkconfig
 sdkconfig.old
 sdkconfig.ci

@@ -49,6 +49,19 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_CACHE_L2_CACHE_256KB=y
 CONFIG_CACHE_L2_CACHE_LINE_128B=y
 
+# --- Wi-Fi --------------------------------------------------------------------
+# Nothing to set. The radio is on the ESP32-C6 next door and is reached through
+# esp_wifi_remote and esp_hosted (see main/idf_component.yml), and both come
+# configured for this arrangement: SDIO on CMD 19 / CLK 18 / D0-D3 14-17 with
+# the slave's reset on GPIO 54, which is what Waveshare wired and what their
+# own wifistation example relies on without overriding anything either.
+#
+# CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n does *not* belong here, tempting as it
+# looks: that symbol lives inside `if (ESP_WIFI_ENABLED || ESP_HOST_WIFI_ENABLED)`
+# in esp_wifi's Kconfig, neither of which this build sets -- the radio is not
+# local -- so the line is accepted, ignored, and reads afterwards as `=y`. The
+# soft-ap code it would save sits on the C6 anyway.
+
 # --- System -------------------------------------------------------------------
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_FREERTOS_HZ=1000

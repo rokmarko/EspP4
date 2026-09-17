@@ -55,7 +55,8 @@ python3 .claude/skills/run-espp4/driver.py shot --scene gauge --out gauge.png
 ```
 
 **The simulator needs none of the IDF environment.** It is a plain CMake
-project; it wants `libsdl2-dev` and the same `lv_font_conv`:
+project; it wants `libsdl2-dev`, Paho for the cloud client
+(`libpaho-mqtt-dev libpaho-mqttpp-dev`) and the same `lv_font_conv`:
 
 ```bash
 cmake -S port/pc -B build-sim -G Ninja
@@ -115,10 +116,12 @@ The firmware carries a one-character debug console -- USB-Serial/JTAG on the
 board, stdin/stdout in the simulator, the same protocol on both
 (`src/SerialConsole.cpp`): `i` stats (scene, frame time, heap, the model's
 rpm/eng/moving/stack, the CAN counters, the NVS entry count and the internal
-heap low-water mark, plus the settings page's level and selection), `t` toggle
+heap low-water mark, plus the settings page's level and selection and the cloud
+client's state and counters), `t` toggle
 scene, the terminal's own arrows / Enter / Esc to drive the settings page
 (`m`/`M` are unambiguous aliases for down and Enter), `w` write the option
-blobs to NVS, `P` push a parameter at ourselves over CAN, `s`/`S` screenshot as
+blobs to NVS, `P` push a parameter at ourselves over CAN, `c` connect the cloud
+client or drop it again, `s`/`S` screenshot as
 base64 RGB888. `.claude/skills/run-espp4/` documents the protocol and ships
 `driver.py`, which is how you smoke-test either build or get a PNG of the panel
 without looking at it -- `--sim` picks the simulator. Read that SKILL.md before
@@ -313,8 +316,9 @@ settings store.
 
 Scenes cycle `gauge` -> `scale` (tachometer, `Scale::DrawArc`) -> `ias`
 (airspeed, `Scale::DrawArcIAS`) -> `altimeter` (three pointers over a
-full-circle `DrawArc`) -> `rpm` (engine and rotor side by side) -> `menu` (the
-settings page, which is not an instrument at all -- see below).
+full-circle `DrawArc`) -> `rpm` (engine and rotor side by side) -> `panel` (a
+configured sheet of items rather than one instrument -- see below) -> `menu`
+(the settings page, which is not an instrument at all -- see below).
 `Arc2D::IsCircle()` is what makes the altimeter drop the label that would
 otherwise land on top of its zero.
 
@@ -388,9 +392,67 @@ Two consequences worth knowing:
   changes style by scene: this face needs two smaller boxes side by side where
   every other one uses a single centred box at the full size.
 
-**Labels are always white**, whatever the pen -- `DrawTextAsPath()` in the Qt
-original forces white too, and without it `DrawArcIAS` leaves a red pen behind
-after the Vne dash and every label comes out red.
+**A scale's labels are always white**, whatever the pen -- `DrawTextAsPath()`
+in the Qt original forces white too, and without it `DrawArcIAS` leaves a red
+pen behind after the Vne dash and every label comes out red. White is the
+*default* of `PainterTvg::DrawTextAnchored()`, not a rule the back end
+enforces: `src/Item/` letters a readout in the colour of the band its pointer
+is standing in, which is the only place that argument is ever passed.
+
+**`src/Item/` is a sheet of items, drawn in two passes.** An item is one
+parameter inside one box -- `item::Arc`, `item::BarH`, `item::BarV`,
+`item::Value` -- and it is `lasky::utils::Arc` and its siblings from
+`Public/Nesis` rewritten against `PainterTvg`.
+
+`item::Base` is two pure virtuals and nothing else: `DrawStatic(Painter&)` and
+`DrawDynamic(Painter&)`. An item is built for one row of the layout and keeps
+that row's parameter, box and style for its whole life, so there is nothing to
+hand it per frame and nothing for the panel to branch on. What the kinds share
+sits below `Base` as free functions in `item` (`DrawPlate()`, `DrawBands()`,
+`DrawPointer()`, `FitName()`, the readout pair); what only one kind needs is
+that kind's own business -- an arc works out where its centre goes, a bar does
+not care. `item::Panel` is what makes the split pay:
+
+- **the static half is rendered once**, into a background `lvgl::DrawBuf` of
+  its own: the plates, the bare track, the coloured bands, every title;
+- **every frame, that whole buffer is blitted over the canvas**
+  (`lv_draw_buf_copy()`) and only the pointers and the readouts are drawn on
+  top of it.
+
+That is the whole reason a panel of a dozen items is affordable here. A ThorVG
+frame costs tens of milliseconds on this board and the count of paths is what
+drives it; the bands and the lettering are most of those paths and none of them
+move. The price is one more ARGB8888 buffer the size of the canvas, which LVGL
+places in PSRAM -- and if there is no room for it, `Scene` drops `Mode::Panel`
+out of the cycle the same way it drops the settings page.
+
+Four things to know:
+
+- **A layout is data**, not code: `item::Config` is a kind, a `can::Id` and a
+  box, and `Panel::MockupLayout()` is one hardcoded answer standing in until
+  the real one comes out of the settings store. `Panel::Rebuild()` turns those
+  rows into owned `item::Base`s when the layout or the style is set, which is
+  the only place a kind is ever branched on. A row naming an id this unit does
+  not hold is dropped there, not an error -- a layout written for a whole panel
+  will name plenty of them.
+- **An item's parameter pointer is into the container**, and stays valid
+  because `ParameterContainer` only ever has parameters *applied to* in place;
+  nothing is inserted after `app::Parameters`' constructor. A pushed parameter
+  therefore needs no rebuild, only `Invalidate()`.
+- **`Panel::Build()` runs after the model loop**, for the same reason the
+  scenes cache their bands at build time: the items resolve their parameters
+  once, and the container has to exist by then.
+- **`Panel::Invalidate()` is not optional.** The bands live in those pixels, so
+  a changed layout, a changed style or a parameter pushed over the bus has to
+  ask for the static half again. `Scene::RefreshBands()` does.
+- **The static pass borrows the canvas.** LVGL draws into whatever buffer the
+  canvas is pointed at, so `RenderStatic()` points it at the background one,
+  renders, and points it back -- which is why `Render()` is handed the canvas's
+  own `lv_draw_buf_t`.
+- **Items are not scales.** No dashes and no numbered labels: an item is read
+  off the band its pointer is standing in, and a sheet of a dozen has no room
+  to letter each one. `scale::Scale` is still what a single instrument face
+  wants.
 
 `VectorScene.cpp` holds one file-static `Scene`. Its widgets are
 `std::optional<T>` members constructed in `Build()`, because binding objects are
@@ -501,6 +563,83 @@ Bringing `ParamStorage` in pulled miniLZO into the image (`LZO/minilzo.c`, built
 as C and deliberately outside `KANARDIA_COMMON_SOURCES`, because those get
 `-include KanardiaCommon.h`), plus `Param.cpp`, `ParamContainer.cpp`,
 `ParamFuelLevel.cpp`, `CanIdDetails.cpp` and `CRC-32.cpp`.
+
+**The cloud client is MQTT, and it is Nesis's client in miniature.**
+`src/MqttClient.h/.cpp` is the same shape as `core::cloud::CloudClient` in
+`Public/Nesis`, because that is the client the Kanardia server already knows: a
+device with no credentials connects as `provision`, claims itself with the
+product's own provisioning key and secret, keeps the access token it gets back
+and reconnects with it. After that it publishes telemetry every ten seconds and
+answers remote calls on `v1/devices/me/rpc/request/+`.
+
+`app::MqttPort` (src/MqttPort.h) is the seam, next to `CanPort` and
+`BlobStore`. Neither implementation speaks MQTT itself, which is the point: a
+protocol written twice is a product that behaves two ways. `port/esp/MqttPortEsp`
+is ESP-IDF's esp-mqtt component, which brings its own task and its own
+reconnect; `port/pc/MqttPortPaho` is the Eclipse Paho C++ client
+(`sudo apt install libpaho-mqtt-dev libpaho-mqttpp-dev` -- both halves, since
+the C++ package does not pull the C one in, and port/pc/CMakeLists.txt says so
+when either is missing). Paho's own automatic reconnect is switched off there
+and one loop does the dialling, because paho only reconnects after a first
+success and a simulator is routinely started before its broker.
+
+Five things to know:
+
+- **The provisioning key and secret are not Nesis's**, and must not become
+  Nesis's: the pair is what tells the server which device profile a newly
+  claimed unit belongs to. `MQTT_PROVISION_KEY` / `MQTT_PROVISION_SECRET` in
+  MqttClient.cpp carry placeholders and are overridable from the build, so a
+  real pair never has to live in the repository.
+- **Only `sendMessage` and `sendLayout` are answered.** Everything else the
+  server asks a Nesis -- the terminal, the logbook, the autopilot -- is counted
+  and dropped, the same silence Nesis answers an unknown method with. A message
+  lands in the scene's own line for as long as its timeout says; a layout is
+  kept in memory, since nothing here renders one yet.
+- **The receive thread does nothing but copy.** The port delivers on a thread
+  of its own, `OnMessage()` queues the bytes, and every bit of parsing,
+  answering and reconnecting happens on the model task in `Pump()` (50 ms) and
+  `Update1s()`. That is the rule pushed parameters taught the CAN side, and it
+  is also why provisioning can stop and restart the port without deadlocking on
+  the thread that is delivering to it.
+- **The token is one more blob in the settings store**, under the key `mqtt`,
+  in the same JSON shape Nesis keeps in `mqtt.json`. A token stored under a
+  device name we no longer answer to is ignored and the unit claims itself
+  again.
+- **It is off unless a broker is configured**, and says so at boot rather than
+  staying silent, which reads as "not in this build". `ESPP4_MQTT_HOST` (`host`
+  or `host:port`) names one and is also what starts the client at boot; the
+  console's `c` does it by hand against the compiled-in `thing.kanardia.eu`.
+  `ESPP4_MQTT_DEBUG=1` adds a line per message received and per method not
+  answered -- and raises the logger to Debug on its way past, because asking
+  for debug output that the level then drops is the same as no switch at all.
+
+**The board's network is the ESP32-C6 beside the P4.** This chip has no radio.
+`port/esp/WifiEsp.cpp` is an ordinary `esp_wifi_*` station -- netif, event
+loop, `esp_wifi_connect()`, reconnect on every disconnection -- and
+`espressif/esp_wifi_remote` plus `espressif/esp_hosted` carry each of those
+calls to the companion over SDIO, so nothing in the file names the transport.
+`platform::NetworkStart()` / `IsNetworkUp()` / `NetworkStatus()` are the seam;
+the simulator answers "the machine's own network, already up".
+
+Four things to know:
+
+- **The SSID and passphrase are compiled in** (`WIFI_SSID` / `WIFI_PASSWORD` in
+  WifiEsp.cpp), overridable from the build the way the provisioning pair is.
+- **It comes up last**, after the model loop, in `app::Startup()`. esp_hosted
+  and lwip want internal RAM and tasks of their own, and the three contiguous
+  32 kB stacks have to be placed while the heap is still clean. Wi-Fi took the
+  image from 1.58 MB to 1.80 MB of flash and static DIRAM to 132 kB; whether
+  the stacks still fit is a question only the boot log answers, and
+  `CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1` is already the fallback that was spent.
+- **The C6 has to be carrying ESP-Hosted slave firmware**, which is how it
+  ships. `managed_components/espressif__esp_hosted/docs/esp32_p4_function_ev_board.md`
+  has both ways to replace it: `esp_hosted_slave_ota(url)` from the running P4,
+  or an ESP-Prog on the C6's own UART with the P4 parked in bootloader mode so
+  it cannot drive the C6's reset line.
+- **The SDIO pins are esp_hosted's defaults** -- CMD 19, CLK 18, D0-D3 14-17,
+  slave reset GPIO 54, 4-bit at 40 MHz -- and they are in `sdkconfig`, not in
+  any source file. If Wi-Fi never associates, that list is the first thing to
+  check against the board.
 
 **Options live in a key/blob store.** `src/StorageOptions.h/.cpp` keeps one
 entry per `option::Key`, named `opt_<number>`: Common already packs each option

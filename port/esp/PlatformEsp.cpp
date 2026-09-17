@@ -40,6 +40,11 @@ namespace {
 // How long a blocked write waits before giving up on the host.
 	constexpr TickType_t WRITE_WAIT = pdMS_TO_TICKS(2000);
 
+// What SetLogLevel() was last given. ESP-IDF keeps the level inside its own
+// logger and offers no way to read it back, so the answer to GetLogLevel()
+// has to be remembered here.
+	LogLevel g_eLogLevel = LogLevel::Info;
+
 	esp_log_level_t ToIdf(LogLevel eLevel)
 	{
 		switch(eLevel) {
@@ -81,6 +86,16 @@ void Log(LogLevel eLevel, const char* pszTag, const char* pszFmt, ...)
 void SetLogLevel(LogLevel eLevel)
 {
 	esp_log_level_set("*", ToIdf(eLevel));
+	g_eLogLevel = eLevel;
+}
+
+// --------------------------------------------------------------------------
+
+LogLevel GetLogLevel()
+{
+	// Kept here because ESP-IDF has no getter for the global level -- only
+	// esp_log_level_set(), which writes it and answers nothing.
+	return g_eLogLevel;
 }
 
 // --------------------------------------------------------------------------

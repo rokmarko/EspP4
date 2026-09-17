@@ -24,6 +24,7 @@
 // The settings page also takes the terminal's own keys: the arrows, Enter and
 // Esc, decoded below. `m` and `M` are the unambiguous aliases a script wants.
 //   w   write the option blobs to NVS, then print <<<SAVE ...>>>
+//   c   connect the cloud client, or drop it if it is already up
 //   P   push a parameter at ourselves over CAN (self-test only)
 //   s   screenshot at half resolution  (fast, ~360x360)
 //   S   screenshot at full resolution  (720x720, several seconds)
@@ -42,6 +43,7 @@
 #include "AppOptions.h"
 #include "CanPort.h"
 #include "CanProcessor.h"
+#include "MqttClient.h"
 #include "Platform.h"
 #include "MenuPage.h"
 #include "StorageOptions.h"
@@ -148,7 +150,7 @@ void SinkToBase64(const uint8_t* data, size_t len, void* ctx)
 
 void PrintStats()
 {
-	char		 line[448];
+	char		 line[512];
 	const int tenths = demo::FrameTimeTenths();
 
 	// Model fields prove the processing loop is actually ticking: rpm comes
@@ -175,7 +177,8 @@ void PrintStats()
 		"<<<STATS scene=%s frame_ms=%d.%d heap_int=%u heap_psram=%u "
 		"rpm=%d eng=%d moving=%d model_stack=%u "
 		"can=%s can_rx=%u can_tx=%u can_nod=%u can_alive=%d can_ident=%d can_err=%u can_state=%u "
-		"nvs=%s nvs_opt=%u nvs_used=%u/%u heap_int_min=%u can_push=%u menu=%s menu_sel=%d>>>\n",
+		"nvs=%s nvs_opt=%u nvs_used=%u/%u heap_int_min=%u can_push=%u menu=%s menu_sel=%d "
+		"mqtt=%s mqtt_rx=%u mqtt_tx=%u mqtt_rpc=%u net=%s>>>\n",
 		demo::SceneName(),
 		tenths / 10,
 		tenths % 10,
@@ -203,7 +206,16 @@ void PrintStats()
 		static_cast<unsigned>(heap.uMinFreeInternal),
 		static_cast<unsigned>(app::ParameterPushCount()),
 		menu::LevelName(),
-		menu::Selection()
+		menu::Selection(),
+						// The cloud client. "off" until something connects it: a broker
+						// has to be configured for it to start on its own.
+		app::GetMqttClient().GetStateName(),
+		static_cast<unsigned>(app::GetMqttClient().GetRxCount()),
+		static_cast<unsigned>(app::GetMqttClient().GetTxCount()),
+		static_cast<unsigned>(app::GetMqttClient().GetRpcCount()),
+						// "off" / "joining" / the address on the board; "host" in the
+						// simulator, where the network is the machine's own.
+		platform::NetworkStatus()
 	);
 	WriteStr(line);
 }
@@ -277,6 +289,7 @@ void Screenshot(int step)
 	// the host. Silence logging for the duration; the frame markers below are
 	// written directly, so they are unaffected. In the simulator the two are
 	// separate streams and this costs nothing.
+	const platform::LogLevel eWasLevel = platform::GetLogLevel();
 	platform::SetLogLevel(platform::LogLevel::None);
 
 	char header[96];
@@ -292,15 +305,34 @@ void Screenshot(int step)
 	);
 	WriteStr(footer);
 
-	platform::SetLogLevel(platform::LogLevel::Info);
+	platform::SetLogLevel(eWasLevel);
 }
 
 void Help()
 {
 	WriteStr(
 		"<<<HELP h=help i=stats t=toggle m=menu-next M=menu-activate "
-		"w=save-settings P=push-param s=shot-half S=shot-full>>>\n"
+		"w=save-settings P=push-param c=cloud s=shot-half S=shot-full>>>\n"
 	);
+}
+
+// Connect the cloud client, or drop it if it is already up.
+//
+// It does not start on its own unless a broker is configured -- see
+// MqttClient::IsConfigured() -- so this is how a desk gets one going against
+// ESPP4_MQTT_HOST, or the compiled-in host when nothing names another.
+void ToggleCloud()
+{
+	app::MqttClient& mqtt = app::GetMqttClient();
+
+	if(mqtt.GetState() == app::MqttClient::State::Off)
+		mqtt.Connect();
+	else
+		mqtt.Disconnect();
+
+	char line[64];
+	std::snprintf(line, sizeof(line), "<<<MQTT %s>>>\n", mqtt.GetStateName());
+	WriteStr(line);
 }
 
 // An arrow key is three bytes on the wire -- Esc [ A..D -- so a byte at a time
@@ -377,6 +409,7 @@ void ConsoleTask(void*)
 			PrintStats();
 			break;
 		case 'w':  SaveSettings(); break;
+		case 'c':  ToggleCloud(); break;
 		case 'P':  PushParameter(); break;
 		case 's':  Screenshot(2); break;
 		case 'S':  Screenshot(1); break;

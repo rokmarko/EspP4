@@ -133,6 +133,13 @@ void SetLogLevel(LogLevel eLevel)
 
 // --------------------------------------------------------------------------
 
+LogLevel GetLogLevel()
+{
+	return g_eLogLevel.load();
+}
+
+// --------------------------------------------------------------------------
+
 int64_t Micros()
 {
 	const auto dt = std::chrono::steady_clock::now() - g_tStart;
@@ -191,6 +198,26 @@ uint32_t StackHeadroom(TaskHandle /*hTask*/)
 	// Nothing to report: a desktop thread's stack grows into virtual address
 	// space and the number would mean nothing next to the board's.
 	return 0;
+}
+
+// --------------------------------------------------------------------------
+
+// A desktop's network is the operating system's business and is either there
+// or not; there is nothing for this build to bring up, and nothing it could
+// usefully say about it that the machine does not already know.
+bool NetworkStart()
+{
+	return true;
+}
+
+bool IsNetworkUp()
+{
+	return true;
+}
+
+const char* NetworkStatus()
+{
+	return "host";
 }
 
 // --------------------------------------------------------------------------

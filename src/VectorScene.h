@@ -28,7 +28,8 @@ bool CreateScene();
 // Advance to the next scene, exactly as a screen tap would. Takes the LVGL lock itself.
 void ToggleScene();
 
-// Current scene name: "gauge", "scale", "ias" or "altimeter".
+// Current scene name: "gauge", "scale", "ias", "altimeter", "rpm", "panel"
+// or "menu".
 const char* SceneName();
 
 // Smoothed ThorVG cost of one frame, in tenths of a millisecond.

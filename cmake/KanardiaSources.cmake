@@ -51,7 +51,16 @@ set(KANARDIA_APP_SOURCES
     ${KANARDIA_ROOT}/src/AppOptions.cpp
     ${KANARDIA_ROOT}/src/AppParameters.cpp
     ${KANARDIA_ROOT}/src/CanProcessor.cpp
+    # src/Item: the panel items, each one a parameter drawn in a box, split
+    # into a static half that is rendered once and a dynamic half that is not.
+    ${KANARDIA_ROOT}/src/Item/ItemBase.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemArc.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemBarH.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemBarV.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemValue.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemPanel.cpp
     ${KANARDIA_ROOT}/src/MenuPage.cpp
+    ${KANARDIA_ROOT}/src/MqttClient.cpp
     ${KANARDIA_ROOT}/src/PainterTvg.cpp
     ${KANARDIA_ROOT}/src/ScaleDraw.cpp
     ${KANARDIA_ROOT}/src/SerialConsole.cpp

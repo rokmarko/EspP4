@@ -100,7 +100,7 @@ public:
 	void PopTransform() { m_dsc.identity(); }
 
 	Size2D TextSize(const char* pszText) const;
-	void	 DrawTextCentred(float fCX, float fCY, const char* pszText);
+	void DrawTextCentred(float fCX, float fCY, const char* pszText) { DrawTextAnchored(fCX, fCY, pszText, 0.5f, 0.5f); }
 
 	// Hand the scratch path to the descriptor with whatever pen or brush is
 	// currently set, and clear it. Nothing reaches ThorVG until Flush().
@@ -110,6 +110,15 @@ public:
 	void Flush() { m_dsc.draw(); }
 
 	// -- Beyond the concept -----------------------------------------------
+
+	// Text anchored anywhere in its own box, in a colour of its own.
+	//
+	// fAX and fAY place that box against (fX, fY): 0 puts its left or top edge
+	// there, 0.5 its centre, 1 its right or bottom edge. The scale only ever
+	// wants the centre, which is what DrawTextCentred() asks for; the panel
+	// items letter a title against a margin and a readout against the far
+	// edge, and they colour a value by the band it is standing in.
+	void DrawTextAnchored(float fX, float fY, const char* pszText, float fAX, float fAY, ::gui::ARGB argb = C32_WHITE);
 
 	// VectorScene draws its faces, needles and gradients straight against the
 	// LVGL objects. None of that has a Qt counterpart in this project, so it

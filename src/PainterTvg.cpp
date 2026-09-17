@@ -61,7 +61,7 @@ Size2D PainterTvg::TextSize(const char* pszText) const
 
 // --------------------------------------------------------------------
 
-void PainterTvg::DrawTextCentred(float fCX, float fCY, const char* pszText)
+void PainterTvg::DrawTextAnchored(float fX, float fY, const char* pszText, float fAX, float fAY, ::gui::ARGB argb)
 {
 	if(m_pFont == nullptr)
 		return;
@@ -69,8 +69,8 @@ void PainterTvg::DrawTextCentred(float fCX, float fCY, const char* pszText)
 	const Size2D size = TextSize(pszText);
 
 	lv_area_t area;
-	area.x1 = static_cast<int32_t>(std::lround(fCX - size.fW / 2.0f));
-	area.y1 = static_cast<int32_t>(std::lround(fCY - size.fH / 2.0f));
+	area.x1 = static_cast<int32_t>(std::lround(fX - fAX * size.fW));
+	area.y1 = static_cast<int32_t>(std::lround(fY - fAY * size.fH));
 	area.x2 = area.x1 + static_cast<int32_t>(size.fW) - 1;
 	area.y2 = area.y1 + static_cast<int32_t>(size.fH) - 1;
 
@@ -79,9 +79,10 @@ void PainterTvg::DrawTextCentred(float fCX, float fCY, const char* pszText)
 	dsc.text			= pszText;
 	dsc.text_local = 1;	  // pszText is a stack buffer; make LVGL copy it
 	dsc.font			= m_pFont;
-	// Always white, whatever the pen is: the Qt back end forces white too,
-	// which is why labels survive a red V-speed dash leaving its pen behind.
-	dsc.color = lv_color_hex(C32_WHITE);
+	// Never the pen: the Qt back end forces its own colour too, which is why
+	// labels survive a red V-speed dash leaving its pen behind. The scale
+	// takes the default white; a panel item's readout names its band colour.
+	dsc.color = lv_color_hex(argb);
 	dsc.opa	 = LV_OPA_COVER;
 	dsc.align = LV_TEXT_ALIGN_CENTER;
 

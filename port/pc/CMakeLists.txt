@@ -15,8 +15,9 @@
 # component manager and not tracked, so a checkout that has never run
 # `idf.py reconfigure` takes the second path.
 #
-# Needs, beyond a C++23 compiler: libsdl2-dev, and lv_font_conv for the
-# Kanardia fonts (npm install --prefix tools lv_font_conv).
+# Needs, beyond a C++23 compiler: libsdl2-dev, libpaho-mqttpp-dev (the cloud
+# client's desktop transport) and lv_font_conv for the Kanardia fonts
+# (npm install --prefix tools lv_font_conv).
 # ---------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.20)
@@ -46,6 +47,36 @@ if(NOT SDL2_FOUND)
     pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
     add_library(SDL2::SDL2 ALIAS PkgConfig::SDL2)
 endif()
+
+# ---------------------------------------------------------------------------
+# Eclipse Paho, the MQTT client
+# ---------------------------------------------------------------------------
+#
+# What port/pc/MqttPortPaho.cpp is app::MqttPort on, the way the board's port
+# is esp-mqtt. Debian ships no CMake config for it, so this is a plain header
+# and library search.
+#
+# Both halves are needed, and libpaho-mqttpp-dev does not pull the other one
+# in: mqtt/async_client.h includes MQTTAsync.h, and enough of the C++ API is
+# inline that the C library lands on the link line as well. So the C++ headers
+# are there and unusable until the C package is installed too.
+
+find_path(PAHO_MQTTPP_INCLUDE_DIR mqtt/async_client.h)
+find_path(PAHO_MQTTC_INCLUDE_DIR MQTTAsync.h)
+find_library(PAHO_MQTTPP_LIBRARY NAMES paho-mqttpp3)
+# The SSL build first: it is what the packaged C++ library is linked against,
+# and "ssl://" in MqttPortPaho.cpp needs nothing else the day the broker wants
+# it. paho-mqtt3a is the same client without TLS.
+find_library(PAHO_MQTTC_LIBRARY NAMES paho-mqtt3as paho-mqtt3a)
+
+if(NOT PAHO_MQTTPP_INCLUDE_DIR OR NOT PAHO_MQTTC_INCLUDE_DIR
+        OR NOT PAHO_MQTTPP_LIBRARY OR NOT PAHO_MQTTC_LIBRARY)
+    message(FATAL_ERROR
+        "Eclipse Paho MQTT not found. Install both halves with:\n"
+        "    sudo apt install libpaho-mqtt-dev libpaho-mqttpp-dev")
+endif()
+
+message(STATUS "Paho:     ${PAHO_MQTTPP_LIBRARY}")
 
 # ---------------------------------------------------------------------------
 # LVGL, and the C++ binding over it
@@ -119,6 +150,7 @@ set(PORT_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/PlatformSim.cpp
     ${CMAKE_CURRENT_LIST_DIR}/CanPortCanu.cpp
     ${CMAKE_CURRENT_LIST_DIR}/BlobStoreFile.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/MqttPortPaho.cpp
     ${CMAKE_CURRENT_LIST_DIR}/FirmwarePc.cpp
 )
 
@@ -134,7 +166,12 @@ target_include_directories(espp4-sim PRIVATE
     ${KANARDIA_APP_INCLUDE_DIRS}
     ${CMAKE_CURRENT_LIST_DIR})
 
-target_link_libraries(espp4-sim PRIVATE lvgl_cpp lvgl SDL2::SDL2)
+target_include_directories(espp4-sim SYSTEM PRIVATE
+    ${PAHO_MQTTPP_INCLUDE_DIR}
+    ${PAHO_MQTTC_INCLUDE_DIR})
+
+target_link_libraries(espp4-sim PRIVATE lvgl_cpp lvgl SDL2::SDL2
+    ${PAHO_MQTTPP_LIBRARY} ${PAHO_MQTTC_LIBRARY})
 
 target_compile_options(espp4-sim PRIVATE -Wall -Wextra)
 

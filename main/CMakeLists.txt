@@ -20,6 +20,8 @@ set(PORT_SOURCES
     ${KANARDIA_ROOT}/port/esp/PlatformEsp.cpp
     ${KANARDIA_ROOT}/port/esp/CanPortEsp.cpp
     ${KANARDIA_ROOT}/port/esp/BlobStoreNvs.cpp
+    ${KANARDIA_ROOT}/port/esp/MqttPortEsp.cpp
+    ${KANARDIA_ROOT}/port/esp/WifiEsp.cpp
     ${KANARDIA_ROOT}/port/esp/FirmwareEsp.cpp
 )
 
@@ -32,7 +34,11 @@ idf_component_register(
     # BlobStoreNvs.cpp keeps the option and parameter blobs in the `settings`
     # NVS partition.
     # app_update is the OTA API FirmwareEsp.cpp writes through.
-    PRIV_REQUIRES nvs_flash pthread app_update)
+    # mqtt is esp-mqtt, which MqttPortEsp.cpp is app::MqttPort on.
+    # esp_wifi / esp_netif / esp_event are the station in WifiEsp.cpp; on this
+    # chip esp_wifi is headers and netif glue only, and the implementation
+    # behind them comes from the esp_wifi_remote component in the manifest.
+    PRIV_REQUIRES nvs_flash pthread app_update mqtt esp_wifi esp_netif esp_event)
 
 # Common's own compile options.
 #

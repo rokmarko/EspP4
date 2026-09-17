@@ -89,7 +89,7 @@ controller, timing or memory -- it reports its heap figures as zero, and a gauge
 frame that costs ~60 ms on the board costs ~1.5 ms on a desktop.
 
 ```bash
-sudo apt install libsdl2-dev
+sudo apt install libsdl2-dev libpaho-mqtt-dev libpaho-mqttpp-dev
 cmake -S port/pc -B build-sim -G Ninja
 cmake --build build-sim
 ./build-sim/espp4-sim --can /dev/ttyUSB0        # both switches optional
@@ -150,6 +150,28 @@ as base64 RGB888 and writes a PNG (3.7 s at full resolution, 1.8 s at half).
 See [.claude/skills/run-espp4/SKILL.md](.claude/skills/run-espp4/SKILL.md) for the
 protocol and the traps. Build with `-DDEMO_NO_SERIAL_CONSOLE` to compile the
 console out.
+
+## The cloud
+
+[src/MqttClient.h](src/MqttClient.h) is Nesis's `core::cloud::CloudClient` in
+miniature: a unit with no credentials claims itself over MQTT with this
+product's own provisioning key and secret, keeps the access token, publishes
+telemetry and answers two remote calls -- `sendMessage`, which puts a line in
+front of the pilot, and `sendLayout`, which is kept for whatever renders one
+later. The link itself is [src/MqttPort.h](src/MqttPort.h): esp-mqtt on the
+board, the Eclipse Paho C++ client on a desktop. Neither port speaks MQTT
+itself -- both are adapters, so the protocol is implemented once by somebody
+who does that for a living, and the simulator talks to a real broker.
+
+The board reaches the air through the ESP32-C6 beside the P4
+([port/esp/WifiEsp.cpp](port/esp/WifiEsp.cpp), `esp_wifi_remote` + `esp_hosted`
+over SDIO); the SSID and passphrase are compiled in. The client itself stays
+off until a broker is named:
+
+```bash
+ESPP4_MQTT_HOST=127.0.0.1:1883 ./build-sim/espp4-sim   # or the console's `c`
+ESPP4_MQTT_DEBUG=1 ...                                 # a line per message
+```
 
 ## Measured on hardware
 
@@ -265,6 +287,8 @@ src/                     the product -- no operating system named anywhere in he
   ScaleDraw.h/.cpp       the Kanardia scale, drawn once, against either back end
   MenuPage.h/.cpp        the settings page: menu levels over an eye-shaped title bar
   CanProcessor.h/.cpp    CANaerospace decode: NOD, units, pushed-parameter receive
+  MqttClient.h/.cpp      the cloud client: provisioning, telemetry, two remote calls
+  MqttPort.h             the MQTT link as the application sees it
   ApplicationDefines.h   our CAN node id and the services we implement
   AppOptions.h/.cpp      the option set we keep, and the keys Settings walks
   AppParameters.h/.cpp   parameter::ParameterContainer, fed from the NOD
@@ -276,6 +300,8 @@ port/esp/                the board
   PlatformEsp.cpp        ESP-IDF and the BSP behind Platform.h
   CanPortEsp.h/.cpp      app::CanPort on the P4's TWAI controller
   BlobStoreNvs.cpp       app::BlobStore on the `settings` NVS partition
+  MqttPortEsp.cpp        app::MqttPort on ESP-IDF's esp-mqtt component
+  WifiEsp.cpp            Wi-Fi station, through the ESP32-C6 over SDIO
   FirmwareEsp.cpp        platform::FirmwareTarget on ESP-IDF's OTA API
 port/pc/                 the desktop simulator
   CMakeLists.txt         the simulator's own build; needs no ESP-IDF
@@ -284,6 +310,7 @@ port/pc/                 the desktop simulator
   PlatformSim.cpp        POSIX and the standard library behind Platform.h
   CanPortCanu.h/.cpp     app::CanPort on can::CanuCan, with a software loopback
   BlobStoreFile.cpp      app::BlobStore on a directory of files
+  MqttPortPaho.cpp       app::MqttPort on the Eclipse Paho C++ client
   FirmwarePc.cpp         platform::FirmwareTarget on a file
 main/
   CMakeLists.txt         the ESP-IDF component: src/ + port/esp/ + Common + fonts

@@ -13,6 +13,7 @@
 
 #include "CanPort.h"
 #include "CanProcessor.h"
+#include "MqttClient.h"
 #include "Platform.h"
 #include "StorageOptions.h"
 
@@ -299,12 +300,18 @@ namespace {
 			if(g_pProc)
 				g_pProc->Pump();
 
+		// The cloud client on the same beat, and for the same reason: what the
+		// broker sent is parsed and answered here, on this task, rather than
+		// on the thread that received it.
+			GetMqttClient().Pump();
+
 			if(++uTick >= TICKS_PER_SEC) {
 				uTick = 0;
 				g_pModel->Update1s();
 				g_pModel->SendSignOfLife();
 				if(g_pProc)
 					g_pProc->Update1s();
+				GetMqttClient().Update1s();
 			}
 		}
 	}

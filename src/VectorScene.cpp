@@ -22,8 +22,10 @@
 
 #include "AppModel.h"
 #include "KanardiaFont.h"
+#include "MqttClient.h"
 #include "MenuPage.h"
 #include "ScaleDrawTvg.h"
+#include "Item/ItemPanel.h"
 #include "AppParameters.h"
 #include "Avio/Format/AvioFormat.h"
 #include "Parameter/ParamBands.h"
@@ -51,6 +53,7 @@ using lvgl::Label;
 using lvgl::ObjFlag;
 using lvgl::Opacity;
 using lvgl::Screen;
+using lvgl::TextAlign;
 using lvgl::Timer;
 using lvgl::VectorDraw;
 using lvgl::VectorPath;
@@ -61,7 +64,7 @@ constexpr const char* TAG = "scene";
 // buffer of that format. Any other format costs a temporary full-area ARGB8888
 // allocation plus a blend-back on every single frame. 400*400*4 = 640 kB, which
 // LVGL's allocator places in PSRAM.
-constexpr int32_t	 CANVAS_SIZE = 400;
+constexpr int32_t	 CANVAS_SIZE = 480;
 constexpr float	 CTR			 = CANVAS_SIZE / 2.0f;
 constexpr uint32_t FRAME_MS	 = 33;	 // ~30 vector frames/s
 
@@ -126,6 +129,13 @@ constexpr uint32_t ROTOR_RGB	= 0x5CE1B0;
 // Every other scene's box.
 constexpr uint32_t BOX_RGB = 0x3D5A9E;
 
+// The cloud's line, one colour per kind of message. Info is the box blue the
+// readouts already use; the other two are the amber and the red every Kanardia
+// product warns in.
+constexpr uint32_t TOAST_INFO_RGB	 = 0x1B3566;
+constexpr uint32_t TOAST_CAUTION_RGB = 0x8A6400;
+constexpr uint32_t TOAST_WARNING_RGB = 0x8A1B2B;
+
 // lv_color32_t is laid out blue, green, red, alpha.
 constexpr lv_color32_t Rgba(uint32_t rgb, uint8_t a = 0xFF)
 {
@@ -169,6 +179,10 @@ public:
 		Ias,
 		Altimeter,
 		Rpm,
+		// A panel of items rather than one instrument: arcs, bars and bare
+		// readouts, laid out from a configuration. It renders differently
+		// from everything above it -- see Tick().
+		Panel,
 		// Not an instrument at all: the settings page, on a screen of its own.
 		// It is in this cycle because it is what a tap already does, and
 		// because it keeps one name -- SceneName() -- answering for the whole
@@ -184,10 +198,15 @@ public:
 
 private:
 	void Tick();
+	void FinishFrame(int64_t tStart);
 	void DrawGauge(VectorDraw& dsc, VectorPath& path);
 
 	// Re-read every cached band set from the parameter container.
 	void RefreshBands();
+
+	// Put whatever the cloud pushed at us with sendMessage in front of the
+	// pilot, and take it away again when its time is up.
+	void ShowCloudMessage();
 
 	void BuildScale();
 	void DrawScale(scale::tvg::Painter& P);
@@ -226,6 +245,10 @@ private:
 	std::optional<Label> m_stats;
 	std::optional<Label> m_hint;
 	std::optional<Label> m_glyphs;
+	// What a remote sendMessage call left. Hidden whenever nothing is due.
+	std::optional<Label> m_toast;
+	// platform::Micros() at which the toast goes away; 0 when none is up.
+	int64_t					m_tToastUntil = 0;
 	std::optional<Timer> m_timer;
 
 	// Scenes 2-4 are Kanardia scales, assembled from the shared Common code:
@@ -260,6 +283,12 @@ private:
 	scale::style::Style m_rpmStyle;
 	scale::Arc2D		  m_engRpmArc;
 	scale::Arc2D		  m_rotRpmArc;
+
+	// The item panel and its own background buffer. It draws itself whole --
+	// it blits its static half over the canvas rather than starting from
+	// fill_bg() -- so it is the one mode Tick() does not open a layer for.
+	item::Panel m_panel;
+	bool			m_bPanel = false;
 
 	// Whether the settings page was built. It shares this board's PSRAM with
 	// the instrument canvas; if there was no room for its header, the cycle
@@ -404,11 +433,51 @@ void Scene::DrawGauge(VectorDraw& dsc, VectorPath& path)
 // dash/band/label geometry. Nothing here is ESP- or LVGL-specific.
 void Scene::RefreshBands()
 {
+	// The bands live in the panel's background buffer, so a pushed parameter
+	// has to have it drawn again.
+	m_panel.Invalidate();
+
 	m_bands	  = ParameterBands(can::Id::EngineRPM_1);
 	m_rotBands = ParameterBands(can::Id::RotorRPM_1);
 	m_iasBands = ParameterBands(can::Id::IndicatedAirspeed);
 	m_altBands = ParameterBands(can::Id::BaroCorrectedAltitude);
 	APP_LOGI(TAG, "scale bands refreshed from the parameter container");
+}
+
+// -----------------------------------------------------------------------------
+
+// The one thing a remote sendMessage call does here.
+//
+// The client left the text on the model task; this runs on the LVGL task,
+// which is the only one that may touch the label. A message that arrives while
+// another is still up replaces it -- the newer one is the one worth reading.
+//
+// The settings page pauses this timer, so a message pushed while it is open
+// waits for the pilot to leave it rather than being lost.
+void Scene::ShowCloudMessage()
+{
+	if(const std::optional<app::MqttClient::Message> msg = app::GetMqttClient().TakeMessage()) {
+		uint32_t uRgb = TOAST_INFO_RGB;
+		switch(msg->eType) {
+		case app::MqttClient::MessageType::Caution: uRgb = TOAST_CAUTION_RGB; break;
+		case app::MqttClient::MessageType::Warning: uRgb = TOAST_WARNING_RGB; break;
+		case app::MqttClient::MessageType::Info:	  break;
+		}
+
+		m_toast->set_text(msg->ssText.c_str());
+		m_toast->style().bg_color(Color(uRgb));
+		m_toast->remove_flag(ObjFlag::Hidden);
+
+		// A timeout of zero means "until something replaces it", which is what
+		// a message with no deadline of its own should do.
+		m_tToastUntil = msg->iTimeoutMs > 0 ? platform::Micros() + int64_t(msg->iTimeoutMs) * 1000 : 0;
+		return;
+	}
+
+	if(m_tToastUntil != 0 && platform::Micros() >= m_tToastUntil) {
+		m_toast->add_flag(ObjFlag::Hidden);
+		m_tToastUntil = 0;
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -815,6 +884,23 @@ void Scene::DrawRpm(scale::tvg::Painter& P)
 //  Frame loop
 // -----------------------------------------------------------------------------
 
+// What one frame cost, smoothed, and the line that reports it. Every mode
+// ends here, including the panel, which returns before the readout boxes.
+void Scene::FinishFrame(int64_t tStart)
+{
+	const float ms = static_cast<float>(platform::Micros() - tStart) / 1000.0f;
+	m_fRenderMs		= m_fRenderMs == 0.0f ? ms : m_fRenderMs * 0.9f + ms * 0.1f;
+
+	const int ms_x10 = static_cast<int>(m_fRenderMs * 10.0f + 0.5f);
+	m_stats->set_text_fmt(
+		"ThorVG  %dx%d  -  %d.%d ms/frame",
+		static_cast<int>(CANVAS_SIZE),
+		static_cast<int>(CANVAS_SIZE),
+		ms_x10 / 10,
+		ms_x10 % 10
+	);
+}
+
 void Scene::Tick()
 {
 	// A node on the bus may have pushed a new parameter. This runs on the LVGL
@@ -822,6 +908,10 @@ void Scene::Tick()
 	// their value vectors, so it cannot happen on the CAN receive thread.
 	if(app::ApplyPushedParameter() != can::Id::Invalid)
 		RefreshBands();
+
+	// Same rule, one layer up: the cloud client parsed the call on the model
+	// task and left the text here, for the task that owns the widgets.
+	ShowCloudMessage();
 
 	m_fPhase += 1.1f;
 	if(m_fPhase >= 360.0f)
@@ -852,6 +942,16 @@ void Scene::Tick()
 
 	const int64_t t0 = platform::Micros();
 
+	// The panel is its own renderer: it puts its static half down as pixels
+	// and draws only what moves on top, so it neither wants fill_bg() nor a
+	// layer opened for it here.
+	if(m_eMode == Mode::Panel) {
+		m_panel.Render(*m_canvas, m_buf->raw(), BG_COLOR);
+		FinishFrame(t0);
+		m_canvas->invalidate();
+		return;
+	}
+
 	// Opaque background: the display blits the canvas without alpha blending.
 	m_canvas->fill_bg(Color(BG_COLOR), LV_OPA_COVER);
 
@@ -877,17 +977,7 @@ void Scene::Tick()
 	}
 	m_canvas->finish_layer(&layer);  // waits for the draw units
 
-	const float ms = static_cast<float>(platform::Micros() - t0) / 1000.0f;
-	m_fRenderMs		= m_fRenderMs == 0.0f ? ms : m_fRenderMs * 0.9f + ms * 0.1f;
-
-	const int ms_x10 = static_cast<int>(m_fRenderMs * 10.0f + 0.5f);
-	m_stats->set_text_fmt(
-		"ThorVG  %dx%d  -  %d.%d ms/frame",
-		static_cast<int>(CANVAS_SIZE),
-		static_cast<int>(CANVAS_SIZE),
-		ms_x10 / 10,
-		ms_x10 % 10
-	);
+	FinishFrame(t0);
 
 	// Every readout goes through Common's own formatting layer, so the number
 	// is rounded the way that function is rounded everywhere else and the unit
@@ -908,9 +998,10 @@ void Scene::Tick()
 		m_valueLabel->set_text(Readout(m_fRpm, Function::EngineRPM, unit::Key::RPM).c_str());
 		m_valueLabel2->set_text(Readout(m_fRotorRpm, Function::RotorRPM, unit::Key::RPM).c_str());
 		break;
-	// The timer is paused while the settings page is up, so this is never
-	// reached from there -- but the switch still has to name it.
-	case Mode::Menu: break;
+	// Neither reaches this switch: the panel returned above, and the timer is
+	// paused while the settings page is up. Both still have to be named.
+	case Mode::Panel:
+	case Mode::Menu:	break;
 	}
 
 	m_canvas->invalidate();
@@ -924,6 +1015,7 @@ const char* Scene::ModeName() const
 	case Mode::Ias:		 return "ias";
 	case Mode::Altimeter: return "altimeter";
 	case Mode::Rpm:		 return "rpm";
+	case Mode::Panel:		 return "panel";
 	case Mode::Menu:		 return "menu";
 	}
 	return "?";
@@ -938,7 +1030,8 @@ void Scene::NextMode()
 	case Mode::Scale:		 m_eMode = Mode::Ias; break;
 	case Mode::Ias:		 m_eMode = Mode::Altimeter; break;
 	case Mode::Altimeter: m_eMode = Mode::Rpm; break;
-	case Mode::Rpm:		 m_eMode = m_bMenu ? Mode::Menu : Mode::Gauge; break;
+	case Mode::Rpm:		 m_eMode = m_bPanel ? Mode::Panel : (m_bMenu ? Mode::Menu : Mode::Gauge); break;
+	case Mode::Panel:		 m_eMode = m_bMenu ? Mode::Menu : Mode::Gauge; break;
 	case Mode::Menu:		 m_eMode = Mode::Gauge; break;
 	}
 
@@ -973,6 +1066,7 @@ void Scene::NextMode()
 		case Mode::Ias:		 return -46;
 		case Mode::Altimeter: return 66;
 		case Mode::Rpm:		 return 150;
+		case Mode::Panel:		 return 0;
 		case Mode::Menu:		 return 0;
 		}
 		return 0;
@@ -982,9 +1076,13 @@ void Scene::NextMode()
 	// face to fit them side by side under a 400 px canvas. Every other scene
 	// uses one centred box at the full size.
 	const bool bDual = (m_eMode == Mode::Rpm);
+	// Every item on the panel letters its own readout, so the scene's box has
+	// nothing left to say there.
+	const bool bPanel = (m_eMode == Mode::Panel);
 	m_valueLabel->style()
 		.text_font(bDual ? &lv_font_kanardia_20 : &lv_font_kanardia_28)
-		.border_color(Color(bDual ? ENGINE_RGB : BOX_RGB));
+		.border_color(Color(bDual ? ENGINE_RGB : BOX_RGB))
+		.opa(bPanel ? Opacity::Transparent : Opacity::Cover);
 	m_valueLabel->align(Align::Center, bDual ? -72 : 0, iOffsetY);
 	m_valueLabel2->style().opa(bDual ? Opacity::Cover : Opacity::Transparent);
 	m_valueLabel2->align(Align::Center, 72, iOffsetY);
@@ -1087,6 +1185,31 @@ bool Scene::Build()
 	m_glyphs.emplace(*m_screen, ssGlyphs.c_str());
 	m_glyphs->style().text_font(&lv_font_kanardia_28).text_color(Color(0x7FA5D8));
 	m_glyphs->align(Align::TopMid, 0, 132);
+
+	// The cloud's own line. It sits below the readout, across the widest part
+	// of the panel, and is hidden until a remote sendMessage call fills it.
+	m_toast.emplace(*m_screen, "");
+	m_toast->set_long_mode(Label::LongMode::Wrap);
+	m_toast->set_width(480);
+	m_toast->style()
+		.text_font(&lv_font_kanardia_20)
+		.text_color(Color(0xE8F4FF))
+		.text_align(TextAlign::Center)
+		.bg_color(Color(TOAST_INFO_RGB))
+		.bg_opa(Opacity::Cover)
+		.radius(10)
+		.pad_hor(14)
+		.pad_ver(8)
+		.border_width(0);
+	m_toast->align(Align::Center, 0, 150);
+	m_toast->add_flag(ObjFlag::Hidden);
+
+	// The panel keeps a second buffer the size of the canvas. If there is no
+	// room for it the cycle simply skips that mode, the way it skips the
+	// settings page when its header will not fit.
+	m_bPanel = m_panel.Build(CANVAS_SIZE, CANVAS_SIZE);
+	if(m_bPanel == false)
+		APP_LOGE(TAG, "item panel not available");
 
 	m_screen->on_click([this](lvgl::Event&) { NextMode(); });
 	m_timer.emplace(FRAME_MS, [this](Timer*) { Tick(); });

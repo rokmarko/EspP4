@@ -46,8 +46,10 @@ The driver needs `pyserial`, which lives in the IDF virtualenv — it re-execs
 itself there automatically, so serial commands work from a plain `python3` with
 no `source export.sh`.
 
-**The simulator needs none of the IDF.** It wants `libsdl2-dev`, the same
-`lv_font_conv`, a C++23 compiler and a display to open its window on. Build it
+**The simulator needs none of the IDF.** It wants `libsdl2-dev`, Paho
+(`libpaho-mqtt-dev libpaho-mqttpp-dev`, what the cloud client's desktop port is
+built on), the same `lv_font_conv`, a C++23 compiler and a display to open its
+window on. Build it
 with `--sim build`, which configures `port/pc` into `build-sim/` and builds it.
 
 ## Run (agent path)
@@ -103,7 +105,7 @@ then proves the UI is live by reading stats:
 [ok] app_main reached         (panel 720x720)
 [ok] MIPI-DSI panel driver    (jd9365)
 [ok] GT911 touch              (Touch 0x5d found)
-[ok] scene built              (canvas 400x400 ARGB8888 ready)
+[ok] scene built              (canvas 480x480 ARGB8888 ready)
 [ok] debug console            (<<<CONSOLE ready>>>)
 [ok] stats: <<<STATS scene=gauge frame_ms=65.5 heap_int=82323 heap_psram=28772900 rpm=2037 eng=1 moving=0 model_stack=7352 can=self-test can_rx=76 can_tx=76 can_nod=72 can_alive=1 can_ident=0 can_err=0 can_state=1 nvs=open nvs_opt=4 nvs_used=34/756 heap_int_min=32607 can_push=0>>>
 [ok] ThorVG frame time 65.5 ms
@@ -117,7 +119,7 @@ loop:
 
 ```
 [ok] main reached             (panel 720x720)
-[ok] scene built              (canvas 400x400 ARGB8888 ready)
+[ok] scene built              (canvas 480x480 ARGB8888 ready)
 [ok] CAN port                 (CAN up:)
 [ok] model loop               (model loop running)
 [ok] debug console            (<<<CONSOLE ready>>>)
@@ -179,6 +181,37 @@ The transfer is asynchronous — `OldServices::Update()` posts one message per
 call and the model task pumps it every 50 ms, so 92 messages take about 600 ms.
 `P` waits for the services to go idle rather than guessing at a delay.
 
+The `mqtt_*` fields cover the cloud client (`src/MqttClient.cpp`). `mqtt=off`
+is the normal state: it only starts on its own when `ESPP4_MQTT_HOST` names a
+broker (`host` or `host:port`), and nothing brings the board's network up yet.
+`c` connects it by hand -- to that host, or to the compiled-in one when the
+environment names none -- and the state goes `connecting` -> `provisioning` (a
+unit that has not been claimed yet) -> `online`. `mqtt_rpc` counts the remote
+calls it acted on, which is only ever `sendMessage` and `sendLayout`.
+
+`net=` alongside them is the board's Wi-Fi: `off`, `joining`, or the address it
+was given. It is `host` in the simulator, where the network is the machine's
+own. The SSID is compiled in (`WIFI_SSID` in `port/esp/WifiEsp.cpp`), and the
+radio is the ESP32-C6 next to the P4 -- if `net=` never leaves `joining`, the
+SDIO pins in `sdkconfig` (`CONFIG_ESP_HOSTED_SDIO_*`) and the slave firmware on
+the C6 are what to look at, in that order.
+
+With the client off the boot log says so in one line; with `ESPP4_MQTT_DEBUG=1`
+it carries a `D` line per message received and per method not answered, and the
+logger is raised to Debug so those lines actually come out.
+
+Against a broker, the simulator is the cheapest way to exercise that path:
+
+```bash
+ESPP4_MQTT_HOST=127.0.0.1:1883 python3 .claude/skills/run-espp4/driver.py \
+    --sim --state /tmp/espp4 shot --out cloud.png
+```
+
+A `sendMessage` call shows as a coloured line under the readout, so it lands in
+the screenshot; the token the broker hands back is one more blob in the
+settings store (`mqtt.blob` in `--state`, one NVS entry on the board), which is
+why `--state` is worth pointing somewhere known while testing.
+
 `shot` writes a real PNG of the panel and reports which scene it captured:
 
 ```
@@ -193,9 +226,10 @@ Single bytes, no newline. Useful if you talk to the port directly:
 | byte | effect |
 |---|---|
 | `h` | `<<<HELP ...>>>` |
-| `i` | `<<<STATS scene=… frame_ms=… heap_int=… heap_psram=… rpm=… eng=… moving=… model_stack=… can_*=… nvs=… nvs_opt=… nvs_used=… menu=… menu_sel=…>>>` |
+| `i` | `<<<STATS scene=… frame_ms=… heap_int=… heap_psram=… rpm=… eng=… moving=… model_stack=… can_*=… nvs=… nvs_opt=… nvs_used=… menu=… menu_sel=… mqtt=… mqtt_rx=… mqtt_tx=… mqtt_rpc=… net=…>>>` |
 | `w` | write the option blobs to the settings store, then `<<<SAVE ok=… written=… used=…>>>` |
 | `P` | push a parameter at ourselves over CAN, then `<<<PUSH ok=… pushes=…>>>` |
+| `c` | connect the cloud client, or drop it if it is up, then `<<<MQTT state>>>` |
 | `t` | toggle scene, as a screen tap would |
 | `m` | move the settings page's selection one row down, wrapping through the title bar |
 | `M` | activate what the selection rests on, as a tap would (a row, or the title bar: up a level / out of the page) |
@@ -228,7 +262,7 @@ the simulator's own are listed after them.
   and pyserial asserts them on open. So *no board state survives between driver
   invocations* — `toggle` in one command then `shot` in the next captures the
   default scene. Use `shot --scene ias`, which toggles and verifies inside
-  one session. The scenes cycle gauge -> scale -> ias -> altimeter -> rpm.
+  one session. The scenes cycle gauge -> scale -> ias -> altimeter -> rpm -> panel.
 - **Stray bytes can toggle the scene behind your back** right after connect
   (leftovers in the USB endpoint). Never assume blind toggling worked; the
   driver reads the scene back from `<<<STATS>>>` and `shot` prints what it

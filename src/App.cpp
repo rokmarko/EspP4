@@ -10,6 +10,7 @@
 #include "App.h"
 
 #include "AppModel.h"
+#include "MqttClient.h"
 #include "Platform.h"
 #include "SerialConsole.h"
 #include "VectorScene.h"
@@ -62,6 +63,27 @@ bool Startup()
 
 	if(StartModelLoop() == false)
 		APP_LOGE(TAG, "model loop failed to start");
+
+	// The network, after the model loop and never before it: bringing Wi-Fi up
+	// on the board starts esp_hosted and lwip, which want internal RAM and
+	// tasks of their own, and the three 32 kB contiguous stacks this product
+	// needs have to be placed while the heap is still clean.
+	platform::NetworkStart();
+
+	// The cloud client, and only if there is a broker configured to talk to:
+	// there is no network stack on the board yet and no broker on a desk, so
+	// one that dialled out on every boot would do nothing but fill the log.
+	// It is started after the model loop because it publishes what the model
+	// holds and keeps its credentials in the settings store the loop opened.
+	if(MqttClient::IsConfigured()) {
+		GetMqttClient().Connect();
+	}
+	else {
+		// Silence here reads as "the cloud client is not in this build", which
+		// is the wrong conclusion: it is in, and waiting to be told where to
+		// dial. Say so once.
+		APP_LOGI(TAG, "cloud client off; set ESPP4_MQTT_HOST=host[:port], or press 'c' on the console");
+	}
 
 	platform::LockDisplay();
 	const bool bOk = demo::CreateScene();
