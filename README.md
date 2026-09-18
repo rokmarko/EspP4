@@ -14,6 +14,7 @@ Tap the screen to cycle the scenes:
 | `ias`       | airspeed indicator -- `Scale::DrawArcIAS()`: coloured arcs, white flap band, Vne radial, V-speed marks |
 | `altimeter` | three-pointer altimeter, full-circle scale, hundreds / thousands / ten-thousands hands |
 | `rpm`       | engine and rotor tachometers side by side, scales mirrored `)(`, a marker riding each |
+| `panel`     | a configured sheet of items -- arcs, bars and bare readouts -- rather than one instrument |
 | `menu`      | the settings page: a menu of levels under an eye-shaped title bar cut to the round glass |
 
 The four instrument scenes are drawn from the shared Kanardia `Public/Common`
@@ -31,9 +32,10 @@ back -- which works out of the box against the simulator's SDL keyboard and
 would work against a keypad or a rotary knob on the board. Changes are written
 once, on the way out.
 
-It is built twice from one set of sources: as firmware for the board, and as a
-**desktop simulator** that puts the same UI in an SDL window. See
-[Two builds](#two-builds).
+It is built three times from one set of sources: as firmware for the board, as
+a **desktop simulator** that puts the same UI in an SDL window, and as a
+**WebAssembly module** that draws single panel items for the Kaledi layout
+editor. See [Three builds](#three-builds).
 
 **Status:** running on hardware. Boot, panel, touch, all five scenes, the model
 loop and screenshot capture verified on a rev v1.3 board over `/dev/ttyACM0`.
@@ -62,7 +64,7 @@ The demo draws into an **ARGB8888 `lvgl::Canvas`**. That format matters:
 any other format (such as the panel's RGB565) it allocates a temporary
 full-area ARGB8888 buffer and blends back — every frame.
 
-## Two builds
+## Three builds
 
 `src/` is the product and names no operating system. Everything that only a
 machine can answer goes through `src/Platform.h` -- logging, time, the LVGL
@@ -82,6 +84,8 @@ lifetime of their own: `app::CanPort`, `app::BlobStore` and
 | threads | FreeRTOS tasks, sized stacks | `std::thread` |
 | build | `idf.py build` (`main/CMakeLists.txt`) | `cmake -S port/pc -B build-sim` |
 
+(`port/wasm/` is the third, and takes only a corner of `src/` -- see below.)
+
 The simulator is not a mock: the scenes, the ThorVG rasteriser, the
 `avio::ModelBase` flight model, the CANaerospace stack and the debug console are
 the same code. What it cannot tell you is anything about the panel, the touch
@@ -99,6 +103,41 @@ LVGL and `lvgl_cpp` come out of `managed_components/` when it is there -- the
 very sources the board builds -- and are fetched at the pinned versions when it
 is not.
 
+### The third build: the Kaledi item renderer
+
+`port/wasm/` takes a corner of the same sources -- `src/Item/` and
+`PainterTvg`, behind a headless LVGL -- and compiles it to WebAssembly for the
+Kaledi layout editor. No bus, no flight model, no settings store: it holds a
+parameter container, takes values for it, and answers with a transparent RGBA
+pixmap of one item.
+
+The reason it exists rather than the editor drawing the widgets a second time
+in JavaScript is the same reason the simulator is not a mock. An editor preview
+is worth nothing unless it is the thing the panel will draw, and a widget drawn
+twice is a widget that looks two ways.
+
+```bash
+. /path/to/emsdk/emsdk_env.sh
+emcmake cmake -S port/wasm -B build-wasm -G Ninja
+cmake --build build-wasm                             # -> kaledi-item.js + .wasm
+node port/wasm/test/smoke.mjs build-wasm [outdir]    # 33 checks, PNGs with outdir
+python3 -m http.server -d build-wasm                 # then open / for the demo page
+```
+
+```js
+const mod = await KalediItem();
+const r   = new mod.Renderer();
+r.setParameter(paramItemBlob);                       // or setParameters(wholeBlob)
+r.setValue(500, 2450);                               // EngineRPM_1, in rpm
+const rgba = r.render(JSON.stringify({ kind: 'Arc', id: 500, w: 160, h: 140 }));
+```
+
+[port/wasm/test/smoke.mjs](port/wasm/test/smoke.mjs) is the only automated test
+in this repository -- there is otherwise no test suite, and a wasm module that
+only a browser can exercise is one nobody checks between releases. It needs
+`npm install --prefix tools flatbuffers`, because it builds a real `ParamItem`
+flatbuffer to push.
+
 ## Code style
 
 Our own code uses `m_` Hungarian members (`m_fPhase`, `m_canvas`) and
@@ -109,12 +148,103 @@ those libraries' own snake_case names.
 
 ## Requirements
 
-* ESP-IDF **v5.5 or newer** (the BSP requires `idf: >=5.5`). Built and verified
-  against the v5.5.1 checkout in `~/esp/v5.5.1/esp-idf`.
-* One-time toolchain install if you have not built for ESP32-P4 before:
-  ```bash
-  ~/esp/v5.5.1/esp-idf/install.sh esp32p4
-  ```
+* **ESP-IDF v5.5.1**, at `~/esp/v5.5.1/esp-idf`. The BSP requires `idf: >=5.5`;
+  the exact version matters in one place -- see
+  [Installing ESP-IDF](#installing-esp-idf) below.
+* **Python 3.9+**, which ESP-IDF 5.5 requires.
+* A **C++23 host compiler**, for the simulator and the wasm module. The board
+  build uses the toolchain `install.sh` fetches, not the host's.
+* **Node** for `lv_font_conv`: the Kanardia fonts are generated from the TTF at
+  build time, by every one of the three builds.
+* The **Kanardia `Public/Common`** working copy, which this project compiles a
+  hand-picked subset of. It defaults to `~/Branch/v4_3`; override it with
+  `-DKANARDIA_BRANCH=/path/to/v4_3`. The build fails loudly if it is missing.
+
+Only the board build needs ESP-IDF. The simulator and the wasm module are
+plain CMake projects -- see [Three builds](#three-builds).
+
+## Installing ESP-IDF
+
+Nothing here is specific to this project until the last step; it is Espressif's
+own procedure, written out so that a fresh machine is one copy-paste away.
+
+**1. Host packages** (Debian/Ubuntu; other distributions are in
+[Espressif's prerequisites](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32p4/get-started/linux-macos-setup.html)):
+
+```bash
+sudo apt install git wget flex bison gperf python3 python3-pip python3-venv \
+                 cmake ninja-build ccache libffi-dev libssl-dev dfu-util \
+                 libusb-1.0-0
+```
+
+**2. Clone the version this project is built against.** The path is a
+convention, not a requirement, but it is the one every command in this README
+and in [CLAUDE.md](CLAUDE.md) assumes:
+
+```bash
+mkdir -p ~/esp/v5.5.1
+git clone -b v5.5.1 --recursive https://github.com/espressif/esp-idf.git ~/esp/v5.5.1/esp-idf
+```
+
+`--recursive` is not optional: mbedTLS, TinyUSB, cJSON and the bootloader's
+micro-ecc are submodules, and a clone without them fails part-way through a
+build rather than at the start. It is a couple of gigabytes; resist the urge to
+add `--depth 1`, because the build derives its version string with
+`git describe` and a shallow clone makes that unreliable. If you already have a
+non-recursive clone, `git submodule update --init --recursive` fixes it.
+
+**3. Install the ESP32-P4 toolchain.** This downloads the RISC-V cross compiler
+and builds a Python virtualenv under `~/.espressif`, and takes a few minutes:
+
+```bash
+~/esp/v5.5.1/esp-idf/install.sh esp32p4
+```
+
+**4. Source the environment, in every shell that builds.** It is deliberately
+not added to your profile -- ESP-IDF puts a whole toolchain and a virtualenv on
+`PATH`, and having that in every terminal is how host builds start failing in
+confusing ways:
+
+```bash
+. ~/esp/v5.5.1/esp-idf/export.sh
+```
+
+**5. Serial port access.** The board appears as `/dev/ttyACM0`. Flashing it
+needs write access, which on most distributions means being in `dialout`:
+
+```bash
+sudo usermod -aG dialout $USER     # then log out and back in
+```
+
+**6. Build it**, which also resolves the managed components on the first run:
+
+```bash
+cd /path/to/EspP4
+idf.py set-target esp32p4
+idf.py build
+```
+
+### Why v5.5.1 and not the newest
+
+**The IDF version decides what chip revision and PSRAM speed you can ask for.**
+Waveshare's own examples pin ESP32-P4 rev 3.x and 250 MHz PSRAM, and IDF 5.5.1
+knows neither -- `CONFIG_ESP32P4_REV_MIN_300` and `CONFIG_SPIRAM_SPEED_250M`
+simply do not exist there, and an unknown symbol in `sdkconfig.defaults` is
+*silently ignored*, which drops PSRAM to its 20 MHz default and costs you most
+of the frame rate with no error anywhere. This project therefore uses
+`CONFIG_SPIRAM_SPEED_200M=y` behind `CONFIG_IDF_EXPERIMENTAL_FEATURES=y`.
+
+So: do not copy Waveshare's configuration verbatim, and after any change to
+`sdkconfig.defaults`, check that it landed:
+
+```bash
+rm -f sdkconfig && idf.py build          # defaults are only read when sdkconfig is absent
+grep -E "^CONFIG_(SPIRAM_SPEED|LV_USE_THORVG|LV_DRAW)" sdkconfig
+```
+
+On IDF >= 5.5.5 you can move up to the rev-3.x / 250 MHz settings. Moving to a
+newer IDF is otherwise safe as far as this project is concerned -- it pins its
+own LVGL, not the IDF's.
 
 Dependencies are resolved automatically:
 
@@ -219,15 +349,9 @@ vector API (`lv_vector_dsc_*` → `lv_draw_vector_dsc_*`); `lvgl_cpp` requires
   not compile. Turning names on takes the other path, at the cost of a const
   name table per widget class.
 
-**Chip revision and PSRAM speed depend on your IDF version.** Waveshare's own
-examples pin ESP32-P4 rev 3.x and 250 MHz PSRAM, but **ESP-IDF 5.5.1 only knows
-revisions up to v1.0 and PSRAM up to 200 MHz** — `CONFIG_ESP32P4_REV_MIN_300`
-and `CONFIG_SPIRAM_SPEED_250M` do not exist there and are *silently ignored*,
-which drops PSRAM to its 20 MHz default. This project therefore uses
-`CONFIG_SPIRAM_SPEED_200M=y` (gated behind `CONFIG_IDF_EXPERIMENTAL_FEATURES=y`)
-and leaves the minimum revision at the IDF default. On IDF ≥ 5.5.5 you can
-switch to the rev-3.x / 250 MHz settings. Always check the generated `sdkconfig`
-after editing `sdkconfig.defaults` — unknown symbols fail quietly.
+**Chip revision and PSRAM speed depend on your IDF version**, and an unknown
+Kconfig symbol fails quietly rather than loudly. See
+[Why v5.5.1 and not the newest](#why-v551-and-not-the-newest).
 
 **Stack sizes.** ThorVG is far hungrier than LVGL's own draw code:
 
@@ -273,10 +397,10 @@ CMakeLists.txt           ESP-IDF project definition
 partitions.csv           2 x 4 MB OTA app slots + 24 kB settings NVS, on 16 MB flash
 sdkconfig.defaults       target, PSRAM, LVGL, ThorVG and lvgl_cpp configuration
 cmake/
-  KanardiaSources.cmake  the source lists both builds compile
+  KanardiaSources.cmake  the source lists the three builds compile
   KanardiaFonts.cmake    lv_font_conv: Kanardia 14/16/20/28 + KanardiaFont.h
 src/                     the product -- no operating system named anywhere in here
-  App.h/.cpp             the boot both builds share, once a display exists
+  App.h/.cpp             the boot the board and the simulator share, once there is a display
   Platform.h             what the application asks of the machine underneath it
   CanPort.h              the CAN port as the application sees it
   BlobStore.h            where a packed option or parameter blob is kept
@@ -294,7 +418,11 @@ src/                     the product -- no operating system named anywhere in he
   AppParameters.h/.cpp   parameter::ParameterContainer, fed from the NOD
   StorageOptions.h/.cpp  the options and the parameter blob, over a BlobStore
   SerialConsole.h/.cpp   debug console: stats, scene and menu toggle, save settings, screenshot
-  KanardiaCommon.h       Qt shim so Public/Common compiles for both targets
+  KanardiaCommon.h       Qt shim so Public/Common compiles for every target
+  Item/                  one parameter in one box: an arc, a bar, a bare readout
+    ItemBase.h/.cpp      the two-call interface and the primitives they share
+    ItemArc/BarH/BarV/Value  the four kinds
+    ItemPanel.h/.cpp     a sheet of them, and item::MakeItem() for one alone
 port/esp/                the board
   MainEsp.cpp            starts the BSP display, hands over to app::Startup()
   PlatformEsp.cpp        ESP-IDF and the BSP behind Platform.h
@@ -312,6 +440,16 @@ port/pc/                 the desktop simulator
   BlobStoreFile.cpp      app::BlobStore on a directory of files
   MqttPortPaho.cpp       app::MqttPort on the Eclipse Paho C++ client
   FirmwarePc.cpp         platform::FirmwareTarget on a file
+port/wasm/               the Kaledi item renderer -- needs emscripten, not ESP-IDF
+  CMakeLists.txt         its own build: src/Item + PainterTvg + a corner of Common
+  lv_conf.h              port/pc's with one value changed: LV_USE_SDL 0
+  PlatformWasm.cpp       the four Platform.h calls this build actually reaches
+  LvglHeadless.h/.cpp    LVGL with no display worth the name, and the canvas
+  KalediRenderer.h/.cpp  parameters, values, style, and one item as a pixmap
+  KalediConfig.h/.cpp    the editor's item and style JSON
+  Bindings.cpp           what JavaScript sees (embind)
+  demo/index.html        every kind over a chequerboard, with a value slider
+  test/smoke.mjs         33 checks under Node; parambuilder.mjs builds a ParamItem
 main/
   CMakeLists.txt         the ESP-IDF component: src/ + port/esp/ + Common + fonts
   idf_component.yml      BSP + LVGL + lvgl_cpp dependencies

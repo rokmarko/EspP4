@@ -21,11 +21,18 @@
 
 #include "Gui/Rgb.h"
 
-// <cstring> is here for CanPort/CanuCan.cpp, which calls memset() without
-// including anything that declares it -- Qt's headers get there first in the
-// products that build it. This header is force-included into every Common
-// source we compile (see cmake/KanardiaSources.cmake), which makes it the one
-// place to put that right without touching the shared tree.
+// The standard headers below are what Common's own sources use without
+// including. This header is force-included into every Common source we compile
+// (see cmake/KanardiaSources.cmake), which makes it the one place to put that
+// right without touching the shared tree.
+//
+//  <cstring>  CanPort/CanuCan.cpp calls memset(). Qt's headers get there first
+//             in the products that build it.
+//  <array>    Format.cpp declares a std::array<char, 16>. libstdc++ happens to
+//             pull the definition in through another header and libc++ does
+//             not, so this only shows up on the wasm build, whose toolchain is
+//             clang and libc++.
+#include <array>
 #include <concepts>
 #include <cstdarg>
 #include <cstdio>

@@ -9,7 +9,7 @@ ESP32-P4-WIFI6-Touch-LCD-4C** (4", 720×720 round IPS, 2-lane MIPI-DSI / JD9365,
 GT911 touch). There is no test suite and no linter — the compiler and the board
 are the feedback loop.
 
-**It is built twice**, from one set of sources:
+**It is built three times**, from one set of sources:
 
 ```
 src/          the product. Knows nothing about ESP-IDF, FreeRTOS, SDL or POSIX.
@@ -19,7 +19,11 @@ port/esp/     what only the board can answer: the BSP panel, the TWAI
 port/pc/      the same answers on a desktop: an SDL window, can::CanuCan on a
               CANU adapter, a directory of files, a firmware image on disk.
               Built by port/pc/CMakeLists.txt, a plain CMake project.
-cmake/        the source lists and the font generation both builds share.
+port/wasm/    a corner of it, for the Kaledi layout editor: src/Item/ and
+              PainterTvg compiled to WebAssembly behind a headless LVGL, with
+              no bus, no model and no store. Built by port/wasm/CMakeLists.txt
+              with emscripten. See "The Kaledi item renderer" below.
+cmake/        the source lists and the font generation all three builds share.
 ```
 
 `src/Platform.h` is the seam -- logging, time, the LVGL lock, threads, the host
@@ -71,6 +75,20 @@ python3 .claude/skills/run-espp4/driver.py --sim build
 python3 .claude/skills/run-espp4/driver.py --sim smoke
 python3 .claude/skills/run-espp4/driver.py --sim shot --scene rpm --out rpm.png
 ```
+
+**The wasm module needs none of it either**, only emscripten -- already
+installed and activated at `/home/rok/src/emsdk`, and not on `PATH` by default:
+
+```bash
+. /home/rok/src/emsdk/emsdk_env.sh
+emcmake cmake -S port/wasm -B build-wasm -G Ninja
+cmake --build build-wasm                    # -> kaledi-item.js + .wasm
+node port/wasm/test/smoke.mjs build-wasm [outdir]   # 33 checks, PNGs with outdir
+python3 -m http.server -d build-wasm        # then open / for the demo page
+```
+
+The smoke test builds a real `ParamItem` flatbuffer to push, so it wants one
+more tool: `npm install --prefix tools flatbuffers`.
 
 LVGL and `lvgl_cpp` come from `managed_components/`, so the simulator compiles
 the very sources the board does. That directory is resolved by the IDF
@@ -690,6 +708,70 @@ Three things to know:
   dirty flags; pass `false` to force the whole set out, which is what populates
   a fresh store on the first boot and what the console's `w` command does.
 
+**The Kaledi item renderer is `src/Item/` as WebAssembly.** `port/wasm/`
+compiles the panel items and `PainterTvg` for a browser, so the layout editor
+previews the widget the panel will actually draw rather than a second drawing
+of it in JavaScript. `kaledi::Renderer` (port/wasm/KalediRenderer.h) is the
+whole surface: `setParameter` (one `parameter::fbs::ParamItem`), `setParameters`
+(the packed whole-container blob), `loadDefaults`, `setValue`, `setStyle`,
+`getParameters`, `render`. Parameters and values persist across calls and can
+change during the run; `render` takes one item as JSON and answers a
+transparent RGBA pixmap of it.
+
+What made it possible is one seam: **the parameter container is handed to
+`item::Panel`'s constructor** rather than reached for. `Panel::FindParameter()`
+used to call `app::GetModel()`, which dragged the flight model, the CAN stack
+and the NOD behind an object that needs nothing but a parameter, a box and a
+painter. `Scene::Build()` now passes `pModel->GetParameters()` -- which is the
+other half of why it runs after the model loop -- and the free
+`item::MakeItem(parameters, style, cfg)` takes one too, so the wasm module
+builds the very same items out of a container of its own. `Scene::m_panel` is a
+`std::optional<item::Panel>` for that reason: `g_scene` is a file static and
+exists long before the model does.
+
+Seven things to know:
+
+- **The parameters come from Common's own loader, not `app::Parameters`.**
+  `parameter::ParameterLoaderBase::CreateNODs()` walks Common's default
+  id -> (function, user unit, count, names) table, lays a `ParamStorage` blob
+  over it and wires each callback to a `can::DirectNOD` -- the path Nesis takes.
+  `app::Parameters` hardcodes the four this firmware shows, which is no use to
+  an editor. `CreateCallback()` is the same thing for one id.
+- **`ParameterContainer::Find()` never returns nullptr.** An id it does not
+  hold gets a default-constructed dummy filed under `can::Id::Invalid`, whose
+  value vector is empty -- so an item built on it reads past the end on its
+  first frame. The guard is `pP->GetId() == eId`, and it is now in both
+  `item::MakeItem()` and the renderer. (`Find()` also *inserts* that dummy, so
+  a const container is mutated by a miss; it is node-based, so the `const
+  Param*` an item already holds stays good.) Common's default table also *opens* with
+  an `Id::Invalid` "Placeholder" row, so `GetCount()` is two more than the
+  number of parameters that can be drawn.
+- **`SetValue()` forces the value past the filter.** `Parameter::GetValueSystem()`
+  low-passes with the function's time constant and re-samples at most every
+  30 ms; without `ForceValue()` an editor would show the number creeping
+  towards the one that was typed.
+- **LVGL's canvas buffer is premultiplied; `ImageData` is not.** White drawn at
+  alpha 120 reads `(120,120,120,120)`. The readout divides alpha back out --
+  skip it and every antialiased edge composites dark. It also swizzles: LVGL's
+  ARGB8888 is B,G,R,A.
+- **The headless display gets no buffers at all.** Nothing is ever refreshed --
+  an item is drawn into the canvas's own buffer by `init_layer()`/
+  `finish_layer()`, which never goes through the display. The obvious gesture,
+  one pixel to keep LVGL happy, **hangs**: `lv_display_set_buffers()` sizes rows
+  against the display's render format, four bytes a pixel at `LV_COLOR_DEPTH 32`,
+  while `sizeof(lv_color_t)` is three.
+- **`port/wasm/lv_conf.h` is `port/pc/lv_conf.h` with `LV_USE_SDL 0`**, and
+  nothing else. Keep them in step. `LV_USE_OS LV_OS_NONE` and
+  `LV_DRAW_SW_DRAW_UNIT_CNT 1` are what keep threads -- and therefore
+  SharedArrayBuffer and cross-origin isolation -- out of the editor's server.
+- **`port/wasm/test/smoke.mjs` is the only automated test in this repository.**
+  It drives the module under Node (33 checks), builds a real `ParamItem` flatbuffer to push
+  (`parambuilder.mjs`, against the schema's field order), and checks that
+  something was drawn, that something was left clear, that the alpha is
+  straight, and that the pushed bands reach the pixels. With an output
+  directory it writes a PNG per kind, which is how the part no assertion covers
+  gets checked.
+
 ### The canvas must stay ARGB8888
 
 `lv_draw_sw_vector` renders straight into an ARGB8888/XRGB8888 buffer. For any
@@ -726,7 +808,9 @@ full reasoning; the short version:
 - **`port/pc/lv_conf.h` is LVGL's own template with eleven values changed**, and
   is kept in LVGL's style -- doxygen comments and all -- so that an LVGL upgrade
   is a re-copy and a diff. The kanardia-style skill skips it for that reason.
-  Its header lists every change and why.
+  Its header lists every change and why. `port/wasm/lv_conf.h` is a copy of it
+  with a twelfth (`LV_USE_SDL 0`) and is skipped for the same reason; an
+  upgrade is a re-copy of one and a one-line diff to the other.
 - **This IDF is v5.5.1.** It does not know ESP32-P4 rev 3.x or 250 MHz PSRAM.
   Waveshare's own examples set `CONFIG_ESP32P4_REV_MIN_300` and
   `CONFIG_SPIRAM_SPEED_250M`, which do not exist here and silently drop PSRAM to
@@ -774,8 +858,10 @@ followed by *more* spaces than tabs are genuine continuation-line alignment and
 must be left alone.
 
 None of this applies outside `src/` and `port/`. `managed_components/`, the
-shared `Public/Common` tree and `port/pc/lv_conf.h` are third-party as far as
-this repo is concerned, carry their own style, and are never reformatted.
+shared `Public/Common` tree and the two `lv_conf.h` (`port/pc/`, `port/wasm/`)
+are third-party as far as this repo is concerned, carry their own style, and
+are never reformatted. `port/wasm/demo/` and `port/wasm/test/` are JavaScript
+and outside the skill's reach either way.
 
 ## Known board quirks
 

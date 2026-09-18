@@ -9,18 +9,52 @@
 
 #include "ItemPanel.h"
 
-#include "AppModel.h"
-#include "AppParameters.h"
 #include "Platform.h"
 
 #include "Parameter/Param.h"
+#include "Parameter/ParamContainer.h"
 
 #include <memory>
 #include <utility>
 
 namespace item {
 
-namespace { constexpr const char* TAG = "panel"; } // namespace
+namespace {
+
+	constexpr const char* TAG = "panel";
+
+	// The parameter a row names, or nullptr when the container does not hold it.
+	//
+	// ParameterContainer::Find() never answers nullptr: an id it does not hold
+	// gets a default-constructed dummy filed under can::Id::Invalid. That one
+	// has an empty value vector, so an item built on it would read past the end
+	// of it on the first frame. The id is what says whether the answer is ours.
+	const Param* FindParameter(const ::parameter::ParameterContainer& parameters, ::can::Id eId)
+	{
+		const Param* pPar = parameters.Find(eId);
+		return (pPar != nullptr && pPar->GetId() == eId) ? pPar : nullptr;
+	}
+
+} // namespace
+
+// --------------------------------------------------------------------------
+
+std::unique_ptr<Base> MakeItem(const ::parameter::ParameterContainer& parameters, const Style& style, const Config& cfg)
+{
+	const Param* pPar = FindParameter(parameters, cfg.eId);
+	if(pPar == nullptr)
+		return nullptr;
+
+	// The only place a kind is branched on. After this a panel holds
+	// item::Base and asks it, which is what those two calls are virtual for.
+	switch(cfg.eKind) {
+	case Kind::Arc:	return std::make_unique<Arc>(style, *pPar, cfg.rc);
+	case Kind::BarH:	return std::make_unique<BarH>(style, *pPar, cfg.rc);
+	case Kind::BarV:	return std::make_unique<BarV>(style, *pPar, cfg.rc);
+	case Kind::Value: return std::make_unique<Value>(style, *pPar, cfg.rc);
+	}
+	return nullptr;
+}
 
 // --------------------------------------------------------------------------
 
@@ -65,40 +99,13 @@ void Panel::SetStyle(const Style& style)
 
 // --------------------------------------------------------------------------
 
-const Param* Panel::FindParameter(::can::Id eId)
-{
-	const app::Model* pModel = app::GetModel();
-	return pModel != nullptr ? pModel->GetParameters().Find(eId) : nullptr;
-}
-
-// --------------------------------------------------------------------------
-
-std::unique_ptr<Base> Panel::MakeItem(const Config& cfg) const
-{
-	const Param* pPar = FindParameter(cfg.eId);
-	if(pPar == nullptr)
-		return nullptr;
-
-	// The only place a kind is branched on. After this the panel holds
-	// item::Base and asks it, which is what those two calls are virtual for.
-	switch(cfg.eKind) {
-	case Kind::Arc:	return std::make_unique<Arc>(m_style, *pPar, cfg.rc);
-	case Kind::BarH:	return std::make_unique<BarH>(m_style, *pPar, cfg.rc);
-	case Kind::BarV:	return std::make_unique<BarV>(m_style, *pPar, cfg.rc);
-	case Kind::Value: return std::make_unique<Value>(m_style, *pPar, cfg.rc);
-	}
-	return nullptr;
-}
-
-// --------------------------------------------------------------------------
-
 void Panel::Rebuild()
 {
 	m_vDrawn.clear();
 	m_vDrawn.reserve(m_vItems.size());
 
 	for(const Config& cfg : m_vItems) {
-		std::unique_ptr<Base> pItem = MakeItem(cfg);
+		std::unique_ptr<Base> pItem = MakeItem(*m_pParameters, m_style, cfg);
 		if(pItem == nullptr) {
 			APP_LOGI(TAG, "row for id %u dropped, this unit does not hold it", static_cast<unsigned>(cfg.eId));
 			continue;

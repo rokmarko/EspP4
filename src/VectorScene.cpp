@@ -287,8 +287,11 @@ private:
 	// The item panel and its own background buffer. It draws itself whole --
 	// it blits its static half over the canvas rather than starting from
 	// fill_bg() -- so it is the one mode Tick() does not open a layer for.
-	item::Panel m_panel;
-	bool			m_bPanel = false;
+	// Constructed in Build(), not here: it takes the model's parameter
+	// container, and g_scene is a file static that exists long before the model
+	// does.
+	std::optional<item::Panel> m_panel;
+	bool								m_bPanel = false;
 
 	// Whether the settings page was built. It shares this board's PSRAM with
 	// the instrument canvas; if there was no room for its header, the cycle
@@ -434,8 +437,10 @@ void Scene::DrawGauge(VectorDraw& dsc, VectorPath& path)
 void Scene::RefreshBands()
 {
 	// The bands live in the panel's background buffer, so a pushed parameter
-	// has to have it drawn again.
-	m_panel.Invalidate();
+	// has to have it drawn again. There may be no panel: it is skipped when
+	// there was no room for that buffer, or no model to take parameters from.
+	if(m_panel.has_value())
+		m_panel->Invalidate();
 
 	m_bands	  = ParameterBands(can::Id::EngineRPM_1);
 	m_rotBands = ParameterBands(can::Id::RotorRPM_1);
@@ -946,7 +951,7 @@ void Scene::Tick()
 	// and draws only what moves on top, so it neither wants fill_bg() nor a
 	// layer opened for it here.
 	if(m_eMode == Mode::Panel) {
-		m_panel.Render(*m_canvas, m_buf->raw(), BG_COLOR);
+		m_panel->Render(*m_canvas, m_buf->raw(), BG_COLOR);
 		FinishFrame(t0);
 		m_canvas->invalidate();
 		return;
@@ -1207,7 +1212,16 @@ bool Scene::Build()
 	// The panel keeps a second buffer the size of the canvas. If there is no
 	// room for it the cycle simply skips that mode, the way it skips the
 	// settings page when its header will not fit.
-	m_bPanel = m_panel.Build(CANVAS_SIZE, CANVAS_SIZE);
+	//
+	// It is also where the panel is told which parameters its rows name. That
+	// is why Build() runs after the model loop -- the container has to exist,
+	// and be populated from its defaults and then from the stored blob, before
+	// a single item resolves the parameter it will draw for the rest of its
+	// life.
+	if(const app::Model* pModel = app::GetModel(); pModel != nullptr) {
+		m_panel.emplace(pModel->GetParameters());
+		m_bPanel = m_panel->Build(CANVAS_SIZE, CANVAS_SIZE);
+	}
 	if(m_bPanel == false)
 		APP_LOGE(TAG, "item panel not available");
 

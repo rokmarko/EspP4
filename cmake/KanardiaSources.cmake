@@ -6,6 +6,12 @@
 # plain CMake project). Everything they have in common is here, so the two
 # never drift into compiling different code and calling it the same product.
 #
+# A third build takes only a corner of it: port/wasm/CMakeLists.txt compiles
+# the panel items to WebAssembly for the Kaledi layout editor, out of
+# KANARDIA_ITEM_SOURCES and KANARDIA_COMMON_RENDER_SOURCES. It draws the very
+# widgets the panel draws, which is the only way an editor's preview can be
+# trusted.
+#
 # Including this file requires KANARDIA_BRANCH to be set and defines:
 #
 #   KANARDIA_ROOT             this repository
@@ -13,7 +19,11 @@
 #   KANARDIA_PRIVATE_COMMON   the private tree, for uCUnitInfoContainer
 #   KANARDIA_APP_SOURCES      src/*.cpp -- the portable half of the product
 #   KANARDIA_APP_INCLUDE_DIRS what those need on the include path
+#   KANARDIA_ITEM_SOURCES     just the panel items and their painter, for a
+#                             build that draws widgets and nothing else
 #   KANARDIA_COMMON_SOURCES   the hand-picked subset of Common, C++
+#   KANARDIA_COMMON_RENDER_SOURCES  the smaller subset KANARDIA_ITEM_SOURCES
+#                             needs on its own
 #   KANARDIA_LZO_SOURCES      miniLZO, which is C
 #   KANARDIA_CANU_SOURCES     can::CanuCan and its CRC, desktop only
 #   KANARDIA_COMMON_FLAGS     what Common has to be compiled with here
@@ -73,6 +83,22 @@ set(KANARDIA_APP_INCLUDE_DIRS
     ${KANARDIA_COMMON}
     ${KANARDIA_COMMON}/ThirdParty
     ${KANARDIA_PRIVATE_COMMON}
+)
+
+# The item renderer on its own: the panel items and the ThorVG back end they
+# draw through, and nothing that knows about a model, a bus or a settings
+# store. That is the whole of what the Kaledi layout editor's wasm module
+# compiles of ours (port/wasm), and it is a subset of the list above -- both
+# other builds get the same files through KANARDIA_APP_SOURCES, so there is
+# one copy of each and no way for the editor and the panel to drift.
+set(KANARDIA_ITEM_SOURCES
+    ${KANARDIA_ROOT}/src/Item/ItemBase.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemArc.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemBarH.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemBarV.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemValue.cpp
+    ${KANARDIA_ROOT}/src/Item/ItemPanel.cpp
+    ${KANARDIA_ROOT}/src/PainterTvg.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -216,6 +242,30 @@ set(KANARDIA_COMMON_SOURCES
     ${SRC_MAP_FILES}
     ${SRC_OPTION_FILES}
     ${SRC_UTIL_FILES}
+)
+
+# The corner of Common an item actually reads, for a build that draws widgets
+# and does nothing else: the parameter model and its flatbuffer storage, the
+# units and the formatting layer every readout goes through, the scale
+# helpers, the NOD a value is written into, and ParameterLoaderBase, which is
+# what turns a stored blob into a container full of parameters wired to that
+# NOD -- Common's own answer, and the one Nesis uses.
+#
+# No flight model, no GNSS, no navigation, no CAN services, no options beyond
+# the unit preferences the loader asks for. A wasm module is shipped over a
+# network and every file here is bytes in the browser's cache.
+set(KANARDIA_COMMON_RENDER_SOURCES
+    ${SRC_PARAM_FILES}
+    ${SRC_UNIT_FILES}
+    ${SRC_SCALE_FILES}
+    ${KANARDIA_COMMON}/Parameter/ParamLoaderBase.cpp
+    ${KANARDIA_COMMON}/Option/OptionBase.cpp
+    ${KANARDIA_COMMON}/Option/OptionUnits.cpp
+    ${KANARDIA_COMMON}/CanAerospace/CanNOD.cpp
+    ${KANARDIA_COMMON}/CanAerospace/CanIdUtils.cpp
+    ${KANARDIA_COMMON}/SystemTime.cpp
+    ${KANARDIA_COMMON}/Format.cpp
+    ${KANARDIA_COMMON}/JulianDay.cpp
 )
 
 # These two throw on malformed input -- `throw std::runtime_error("Unsupported

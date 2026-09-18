@@ -1,0 +1,4 @@
+{
+  "type": "module",
+  "_comment": "Copied beside the built module so that Node can import it. kaledi-item.js is an ES module (-sEXPORT_ES6), and Node decides that from the nearest package.json rather than from the file. Browsers and bundlers ignore this file; port/wasm/test/smoke.mjs does not work without it."
+}

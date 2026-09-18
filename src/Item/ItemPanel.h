@@ -53,6 +53,8 @@
 #include <optional>
 #include <vector>
 
+namespace parameter { class ParameterContainer; }
+
 namespace item {
 
 enum class Kind
@@ -71,9 +73,33 @@ struct Config
 	Rect		 rc;
 };
 
+// One row as the item that draws it, or nullptr when parameters does not hold
+// that row's parameter.
+//
+// The container is handed in rather than reached for. Without that this file
+// would call app::GetModel(), and an item -- which needs nothing but a
+// parameter, a box and a painter -- would drag the flight model, the CAN stack
+// and the NOD in behind it. That is what lets the Kaledi layout editor build
+// the very same items out of a container of its own (port/wasm).
+//
+// This is the only place a Kind is ever branched on. Panel::Rebuild() is a walk
+// over it; the layout editor calls it for one row at a time, which is the whole
+// of what it needs from this header.
+std::unique_ptr<Base>
+MakeItem(const ::parameter::ParameterContainer& parameters, const Style& style, const Config& cfg);
+
 class Panel
 {
 public:
+	// parameters is where every row's can::Id is looked up, and the only thing
+	// this panel is told about the world. It has to outlive the panel: an item
+	// keeps a pointer straight into the container, which stays good because
+	// nothing is ever inserted after the container is built -- parameters are
+	// only ever applied to in place.
+	explicit Panel(const ::parameter::ParameterContainer& parameters) :
+		m_pParameters(&parameters)
+	{}
+
 	// Allocate the background buffer. iW and iH are the canvas the panel is
 	// rendered onto, and the buffer matches it exactly -- the blit is a
 	// whole-buffer copy, not a scaled one.
@@ -111,19 +137,14 @@ private:
 
 	// Turn the configuration into the items that draw it. Called whenever the
 	// layout or the style changes, and never per frame.
+	//
+	// A row naming a parameter this build does not hold is dropped here, not
+	// an error -- a layout written for a whole panel will name plenty of them.
 	void Rebuild();
 
-	// One row as the item that draws it, or nullptr when the row names a
-	// parameter this build does not hold -- a layout written for a whole panel
-	// will name plenty of them, which is not an error.
-	std::unique_ptr<Base> MakeItem(const Config& cfg) const;
-
-	// The parameter this row names, or nullptr when the container does not
-	// hold it. The pointer an item keeps is into the container, which only
-	// ever has parameters applied to it in place, never re-inserted.
-	static const Param* FindParameter(::can::Id eId);
-
 private:
+	const ::parameter::ParameterContainer* m_pParameters;
+
 	Style					  m_style;
 	std::vector<Config> m_vItems;
 

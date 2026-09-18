@@ -6,7 +6,7 @@ Kanardia house style for this project's own C++.
   style.py format [paths...]   banner, plain // comments, clang-format
   style.py new <Name> [-n ns]  scaffold src/<Name>.h and src/<Name>.cpp
 
-With no paths, acts on src/, port/esp/ and port/pc/. Never touch
+With no paths, acts on src/, port/esp/, port/pc/ and port/wasm/. Never touch
 managed_components or the shared Kanardia tree -- both carry their own style.
 """
 
@@ -23,12 +23,14 @@ CLANG       = 'clang-format-20'
 DEFAULT     = ['src/*.cpp', 'src/*.h',
                'src/Item/*.cpp', 'src/Item/*.h',
                'port/esp/*.cpp', 'port/esp/*.h',
-               'port/pc/*.cpp', 'port/pc/*.h']
+               'port/pc/*.cpp', 'port/pc/*.h',
+               'port/wasm/*.cpp', 'port/wasm/*.h']
 BANNER_MARK = 'Kanardia d.o.o.'
-# Ours by location, not by authorship: port/pc/lv_conf.h is LVGL's own
-# lv_conf_template.h with a handful of values changed, and is kept in LVGL's
-# style so that upgrading LVGL stays a re-copy and a diff.
-VENDORED    = ['port/pc/lv_conf.h']
+# Ours by location, not by authorship: the two lv_conf.h are LVGL's own
+# lv_conf_template.h with a handful of values changed, and are kept in LVGL's
+# style so that upgrading LVGL stays a re-copy and a diff. port/wasm's is
+# port/pc's with one value changed, for the same reason.
+VENDORED    = ['port/pc/lv_conf.h', 'port/wasm/lv_conf.h']
 
 BANNER = """\
 /***************************************************************************
@@ -399,7 +401,8 @@ def main():
     s = sub.add_parser('new')
     s.add_argument('name')
     s.add_argument('-n', '--namespace', default='app')
-    s.add_argument('-d', '--dir', default='src', help='src, port/esp or port/pc')
+    s.add_argument('-d', '--dir', default='src',
+                   help='src, port/esp, port/pc or port/wasm')
     a = ap.parse_args()
 
     if subprocess.run(['which', CLANG], capture_output=True).returncode != 0:

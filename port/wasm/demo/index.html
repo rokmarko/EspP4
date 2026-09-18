@@ -1,0 +1,164 @@
+<!doctype html>
+<!--
+  A page to prove the module works, and the shortest example of its API.
+
+  Not part of the editor. It loads the module, asks for Common's default
+  parameters, and draws every item kind for whichever one is picked, over a
+  chequerboard so that the transparency is visible rather than assumed.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kaledi item renderer</title>
+<style>
+  :root {
+    --bg:    #11151f;
+    --panel: #1a2030;
+    --line:  #2b3448;
+    --text:  #dbe3f2;
+    --dim:   #8494b4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { color: var(--dim); margin: 0 0 24px; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: end;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 20px;
+  }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+  select, input[type=number] {
+    background: #0e1424; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: inherit;
+  }
+  input[type=range] { width: 220px; }
+  .value { font-variant-numeric: tabular-nums; color: var(--text); }
+
+  .sheet { display: flex; flex-wrap: wrap; gap: 20px; }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; color: var(--dim); margin-top: 6px; text-align: center; }
+
+  /* The chequerboard: anything that is not transparent shows against it. */
+  canvas {
+    display: block; border-radius: 8px;
+    background-color: #5a6274;
+    background-image:
+      linear-gradient(45deg, #474e5e 25%, transparent 25%, transparent 75%, #474e5e 75%),
+      linear-gradient(45deg, #474e5e 25%, transparent 25%, transparent 75%, #474e5e 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 8px 8px;
+  }
+
+  #err { color: #ff9c9c; min-height: 1.5em; margin-top: 16px; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kaledi item renderer</h1>
+  <p class="sub">The firmware's own <code>src/Item</code>, compiled to WebAssembly. Every pixel here is what the panel draws.</p>
+
+  <div class="controls">
+    <label>Parameter
+      <select id="param"></select>
+    </label>
+    <label>Value <span class="value" id="valueText">0</span>
+      <input type="range" id="value" min="0" max="3000" step="1" value="0">
+    </label>
+    <label>Width
+      <input type="number" id="w" value="180" min="40" max="600" step="10">
+    </label>
+    <label>Height
+      <input type="number" id="h" value="160" min="40" max="600" step="10">
+    </label>
+    <label>Plate
+      <select id="plate">
+        <option value="default">firmware default</option>
+        <option value="none">none (fully transparent)</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="sheet" id="sheet"></div>
+  <div id="err"></div>
+</main>
+
+<script type="module">
+import KalediItem from './kaledi-item.js';
+
+const KINDS = ['Arc', 'BarH', 'BarV', 'Value'];
+
+const mod = await KalediItem();
+const r   = new mod.Renderer();
+
+// Nothing has been configured, so start from what Common knows. A real editor
+// calls setParameters() with the aircraft's own blob instead.
+r.loadDefaults();
+
+const params = JSON.parse(r.getParameters())
+  .filter(p => p.bands > 0)
+  .sort((a, b) => a.id - b.id);
+
+const $ = id => document.getElementById(id);
+
+$('param').innerHTML = params
+  .map(p => `<option value="${p.id}">${p.name} (${p.id}) ${p.unit}</option>`)
+  .join('');
+
+// One canvas per kind, built once.
+const canvases = {};
+$('sheet').innerHTML = KINDS.map(k =>
+  `<figure><canvas id="c${k}"></canvas><figcaption>${k}</figcaption></figure>`).join('');
+for(const k of KINDS) canvases[k] = $('c' + k);
+
+function draw() {
+  const id = Number($('param').value);
+  const w  = Number($('w').value);
+  const h  = Number($('h').value);
+
+  r.setStyle(JSON.stringify(
+    $('plate').value === 'none' ? { uPlateRgb: 'none', uBorderRgb: 'none' }
+                                : { uPlateRgb: '#0E1424', uBorderRgb: '#1E2A44' }));
+
+  r.setValue(id, Number($('value').value));
+  $('valueText').textContent = $('value').value;
+
+  let err = '';
+  for(const kind of KINDS) {
+    const cv = canvases[kind];
+    cv.width = w; cv.height = h;
+
+    const rgba = r.render(JSON.stringify({ kind, id, w, h }));
+    if(rgba === null) { err = r.getLastError(); continue; }
+
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+  }
+  $('err').textContent = err;
+}
+
+// Follow the picked parameter's own range, so the slider always says something.
+function rescale() {
+  const id = Number($('param').value);
+  const p  = params.find(x => x.id === id);
+  $('value').max = p && p.high !== undefined ? p.high : 3000;
+  $('value').min = p && p.low  !== undefined ? p.low  : 0;
+  $('value').step = ($('value').max - $('value').min) / 500;
+  $('value').value = ($('value').max - $('value').min) * 0.6 + Number($('value').min);
+}
+
+for(const el of ['param', 'w', 'h', 'plate'])
+  $(el).addEventListener('change', () => { if(el === 'param') rescale(); draw(); });
+$('value').addEventListener('input', draw);
+
+rescale();
+draw();
+</script>
+</body>
+</html>
